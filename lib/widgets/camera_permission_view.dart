@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -41,8 +42,9 @@ class CameraPermissionView extends StatelessWidget {
     if (isPermissionDenied) {
       icon = Icons.no_photography_rounded;
       title = 'Camera Permission Required';
-      description =
-          'VinKit needs camera access to scan VIN barcodes on windshields and door jambs. Grant access in system settings or enter a VIN manually.';
+      description = kIsWeb
+          ? 'Allow camera access using the camera or site-settings icon in your browser address bar, then tap Retry Camera — or enter a VIN manually.'
+          : 'VinKit needs camera access to scan VIN barcodes on windshields and door jambs. Grant access in system settings or enter a VIN manually.';
     } else if (isUnsupported) {
       icon = Icons.videocam_off_rounded;
       title = 'Camera Scanning Unavailable';
@@ -89,7 +91,7 @@ class CameraPermissionView extends StatelessWidget {
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 24),
-                  if (isPermissionDenied) ...<Widget>[
+                  if (isPermissionDenied && !kIsWeb) ...<Widget>[
                     SizedBox(
                       width: double.infinity,
                       child: FilledButton.icon(

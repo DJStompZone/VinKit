@@ -1,49 +1,75 @@
 import 'package:material_ui/material_ui.dart';
 
-/// Renders a semi-transparent scanner mask with a horizontal barcode cutout,
-/// corner reticles, and status caption over the camera preview.
+/// Renders a semi-transparent scanner mask with a horizontal VIN cutout,
+/// corner reticles, prompt pill, and optional status banner over the camera preview.
 class ScannerOverlay extends StatelessWidget {
   /// Creates a [ScannerOverlay] aligned with [scanWindow].
   const ScannerOverlay({
     super.key,
     required this.scanWindow,
     required this.isPaused,
+    this.promptText,
+    this.showScanLine = true,
     this.statusMessage,
+    this.statusIsError = true,
+    this.statusActionLabel,
+    this.onStatusAction,
   });
 
-  /// Coordinates of the transparent barcode detection region.
+  /// Coordinates of the transparent detection/alignment region.
   final Rect scanWindow;
 
-  /// Whether barcode scanning is currently paused while showing results.
+  /// Whether scanning is currently paused while showing results.
   final bool isPaused;
+
+  /// Optional caption displayed above the cutout.
+  final String? promptText;
+
+  /// Whether to draw the center horizontal laser alignment line.
+  final bool showScanLine;
 
   /// Optional transient status or feedback message shown beneath the cutout.
   final String? statusMessage;
+
+  /// Whether [statusMessage] should be styled as an error banner (`true`) or
+  /// neutral informational banner (`false`).
+  final bool statusIsError;
+
+  /// Optional quick-action button label inside the status banner.
+  final String? statusActionLabel;
+
+  /// Callback invoked when the status banner's quick-action button is tapped.
+  final VoidCallback? onStatusAction;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final accentColor = isPaused ? Colors.white60 : colorScheme.primary;
+    final caption = isPaused
+        ? 'Scanner paused'
+        : (promptText ?? 'Align VIN barcode inside frame');
 
-    return IgnorePointer(
-      child: Stack(
-        children: <Widget>[
-          CustomPaint(
+    return Stack(
+      children: <Widget>[
+        IgnorePointer(
+          child: CustomPaint(
             painter: ScannerOverlayPainter(
               scanWindow: scanWindow,
               borderColor: accentColor,
-              showScanLine: !isPaused,
+              showScanLine: showScanLine && !isPaused,
             ),
             child: const SizedBox.expand(),
           ),
-          Positioned(
-            top: (scanWindow.top - 44).clamp(16.0, double.infinity),
-            left: 24,
-            right: 24,
+        ),
+        Positioned(
+          top: (scanWindow.top - 44).clamp(16.0, double.infinity),
+          left: 20,
+          right: 20,
+          child: IgnorePointer(
             child: Center(
               child: DecoratedBox(
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.62),
+                  color: Colors.black.withValues(alpha: 0.66),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
                     color: Colors.white.withValues(alpha: 0.16),
@@ -55,9 +81,7 @@ class ScannerOverlay extends StatelessWidget {
                     vertical: 6,
                   ),
                   child: Text(
-                    isPaused
-                        ? 'Scanner paused'
-                        : 'Align Code 39 / Code 128 VIN barcode',
+                    caption,
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 13,
@@ -69,43 +93,81 @@ class ScannerOverlay extends StatelessWidget {
               ),
             ),
           ),
-          if (statusMessage != null)
-            Positioned(
-              top: scanWindow.bottom + 14,
-              left: 24,
-              right: 24,
-              child: Center(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: colorScheme.errorContainer.withValues(alpha: 0.94),
-                    borderRadius: BorderRadius.circular(12),
+        ),
+        if (statusMessage != null)
+          Positioned(
+            top: scanWindow.bottom + 14,
+            left: 20,
+            right: 20,
+            child: Center(
+              child: Material(
+                color: statusIsError
+                    ? colorScheme.errorContainer.withValues(alpha: 0.95)
+                    : Colors.black.withValues(alpha: 0.78),
+                borderRadius: BorderRadius.circular(14),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
                   ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 8,
-                    ),
-                    child: Text(
-                      statusMessage!,
-                      style: TextStyle(
-                        color: colorScheme.onErrorContainer,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Flexible(
+                        child: Text(
+                          statusMessage!,
+                          style: TextStyle(
+                            color: statusIsError
+                                ? colorScheme.onErrorContainer
+                                : Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
                       ),
-                      textAlign: TextAlign.center,
-                    ),
+                      if (statusActionLabel != null &&
+                          onStatusAction != null) ...<Widget>[
+                        const SizedBox(width: 10),
+                        TextButton(
+                          onPressed: onStatusAction,
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            backgroundColor: statusIsError
+                                ? colorScheme.onErrorContainer
+                                    .withValues(alpha: 0.14)
+                                : colorScheme.primary.withValues(alpha: 0.28),
+                            foregroundColor: statusIsError
+                                ? colorScheme.onErrorContainer
+                                : Colors.white,
+                          ),
+                          child: Text(
+                            statusActionLabel!,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
               ),
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 }
 
 /// Paints the darkened mask, rounded rectangular cutout, corner brackets, and
-/// horizontal laser alignment guide for [ScannerOverlay].
+/// optional horizontal laser alignment guide for [ScannerOverlay].
 class ScannerOverlayPainter extends CustomPainter {
   /// Creates a [ScannerOverlayPainter] for the given [scanWindow].
   const ScannerOverlayPainter({
@@ -114,7 +176,7 @@ class ScannerOverlayPainter extends CustomPainter {
     required this.showScanLine,
   });
 
-  /// Region left transparent for barcode alignment.
+  /// Region left transparent for VIN alignment.
   final Rect scanWindow;
 
   /// Color used for corner brackets and alignment accents.

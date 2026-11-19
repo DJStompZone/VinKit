@@ -348,54 +348,59 @@ class _VehicleSpecBody extends StatelessWidget {
         result.uniqueSources.isNotEmpty ||
         (result.vehicle.id != null && result.vehicle.id! > 0);
 
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(10, 6, 10, 20),
-      children: <Widget>[
-        // 1. Primary Identity: Year, Make, Model, Trim, Engine, VIN
-        _VehicleIdentityBanner(result: result),
-        const SizedBox(height: 8),
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 840),
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(10, 6, 10, 20),
+          children: <Widget>[
+            // 1. Primary Identity: Year, Make, Model, Trim, Engine, VIN
+            _VehicleIdentityBanner(result: result),
+            const SizedBox(height: 8),
 
-        // 2. Recommended Engine Oil (Immediately visible above the fold)
-        _RecommendedOilBanner(result: result),
-        const SizedBox(height: 8),
+            // 2. Recommended Engine Oil (Immediately visible above the fold)
+            _RecommendedOilBanner(result: result),
+            const SizedBox(height: 8),
 
-        // 3. Filters Spec Table (Oil, Engine Air, Cabin Air, Fuel)
-        _FiltersSpecCard(result: result),
-        const SizedBox(height: 8),
+            // 3. Filters Spec Table (Oil, Engine Air, Cabin Air, Fuel)
+            _FiltersSpecCard(result: result),
+            const SizedBox(height: 8),
 
-        // 4. Wiper Blades Spec Table (Driver, Passenger, Rear + lengths/connectors)
-        _WipersSpecCard(result: result),
+            // 4. Wiper Blades Spec Table (Driver, Passenger, Rear + lengths/connectors)
+            _WipersSpecCard(result: result),
 
-        // 5. Battery & Any Additional Part Categories
-        for (final category in otherCategories) ...<Widget>[
-          const SizedBox(height: 10),
-          if (category == 'battery')
-            _BatterySpecCard(parts: result.partsByCategory[category]!)
-          else
-            _GenericPartCategoryCard(
-              category: category,
-              parts: result.partsByCategory[category]!,
-            ),
-        ],
+            // 5. Battery & Any Additional Part Categories
+            for (final category in otherCategories) ...<Widget>[
+              const SizedBox(height: 10),
+              if (category == 'battery')
+                _BatterySpecCard(parts: result.partsByCategory[category]!)
+              else
+                _GenericPartCategoryCard(
+                  category: category,
+                  parts: result.partsByCategory[category]!,
+                ),
+            ],
 
-        // 6. Full Oil Options Breakdown (when multiple formulations/grades exist)
-        if (hasDetailedOilSection) ...<Widget>[
-          const SizedBox(height: 10),
-          _AllOilOptionsCard(specs: result.oilSpecs),
-        ],
+            // 6. Full Oil Options Breakdown (when multiple formulations/grades exist)
+            if (hasDetailedOilSection) ...<Widget>[
+              const SizedBox(height: 10),
+              _AllOilOptionsCard(specs: result.oilSpecs),
+            ],
 
-        // 7. Fluids & Maintenance Services (with parsed copyable fluid codes)
-        if (groupedServices.isNotEmpty) ...<Widget>[
-          const SizedBox(height: 10),
-          _FluidsServicesCard(groupedServices: groupedServices),
-        ],
+            // 7. Fluids & Maintenance Services (with parsed copyable fluid codes)
+            if (groupedServices.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 10),
+              _FluidsServicesCard(groupedServices: groupedServices),
+            ],
 
-        // 8. Complete Powertrain, Catalog Match & Source Details
-        if (hasMatchMetadata) ...<Widget>[
-          const SizedBox(height: 10),
-          _CatalogAndPowertrainCard(result: result),
-        ],
-      ],
+            // 8. Complete Powertrain, Catalog Match & Source Details
+            if (hasMatchMetadata) ...<Widget>[
+              const SizedBox(height: 10),
+              _CatalogAndPowertrainCard(result: result),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }

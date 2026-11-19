@@ -16,6 +16,7 @@ import 'package:vinkit_app/screens/vehicle_result_screen.dart';
 import 'package:vinkit_app/services/scanner_feedback_service.dart';
 import 'package:vinkit_app/services/vin_lookup_controller.dart';
 import 'package:vinkit_app/services/vin_lookup_service.dart';
+import 'package:vinkit_app/services/vin_ocr_service.dart';
 import 'package:vinkit_app/services/vin_validator.dart';
 import 'package:vinkit_app/theme/app_theme.dart';
 import 'package:vinkit_app/widgets/camera_permission_view.dart';
@@ -40,6 +41,31 @@ class _FakeVinLookupService implements VinLookupService {
 
   @override
   void dispose() {}
+}
+
+class _FakeOcrService implements VinOcrService {
+  const _FakeOcrService();
+
+  @override
+  bool get isSupported => true;
+
+  @override
+  Future<bool> isModelReady() async => true;
+
+  @override
+  Future<void> prepareModels() async {}
+
+  @override
+  Future<VinOcrResult> recognizeText(String imagePath) async {
+    return const VinOcrResult(
+      blocks: <VinOcrTextBlock>[
+        VinOcrTextBlock(text: 'VIN: 1FM5K8GCXNGA77516', confidence: 0.96),
+      ],
+    );
+  }
+
+  @override
+  Future<void> deleteTempImage(String imagePath) async {}
 }
 
 VinLookupResult _explorerResult() {
@@ -177,8 +203,8 @@ VinLookupResult _explorerResult() {
 }
 
 /// Widget tests covering manual entry validation, full-screen vehicle spec
-/// rendering, scanner beep feedback, error retries, clipboard copy, and camera
-/// permission recovery UI.
+/// rendering, scanner beep feedback, strictness selector, OCR mode switching,
+/// error retries, clipboard copy, and camera permission recovery UI.
 void main() {
   group('PlatformScannerFeedbackService', () {
     test('invokes native playScanBeep method channel and haptic feedback', () async {
@@ -495,12 +521,16 @@ void main() {
     });
   });
 
-  group('ScannerScreen desktop fallback', () {
+  group('ScannerScreen desktop fallback & strictness', () {
     testWidgets(
-      'uses DesktopVinEntryView without initializing mobile_scanner on unsupported desktop platforms',
+      'Normal mode accepts Elantra trailing A while Strict mode rejects it',
       (tester) async {
+        String? lookedUpVin;
         final controller = VinLookupController(
-          service: _FakeVinLookupService((_) async => _explorerResult()),
+          service: _FakeVinLookupService((vin) async {
+            lookedUpVin = vin;
+            return _explorerResult();
+          }),
         );
         final feedback = _FakeFeedbackService();
         addTearDown(controller.dispose);
@@ -521,11 +551,109 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('VIN Spec Lookup'), findsOneWidget);
+        expect(find.text('Normal'), findsOneWidget);
+        expect(find.text('Strict'), findsOneWidget);
 
-        // Simulate a USB Code 39 scanner sending a leading I + wrapping asterisks.
-        await tester.enterText(find.byType(TextField), '*I1FM5K8GCXNGA77516*');
+        // Elantra 18-char barcode with trailing 'A' is valid in Normal mode.
+        await tester.enterText(find.byType(TextField), '5NPD84LF0KH412345A');
+        await tester.pump();
+        expect(find.text('Valid 17-character VIN ready'), findsOneWidget);
+
+        // Switch to Strict mode: trailing 'A' should now be rejected.
+        await tester.tap(find.text('Strict'));
+        await tester.pump();
+        expect(
+          find.textContaining('18/17'),
+          findsOneWidget,
+        );
+
+        // Switch back to Normal mode and submit.
+        await tester.tap(find.text('Normal'));
         await tester.pump();
         await tester.tap(find.text('Look Up Vehicle Specs'));
+        await tester.pumpAndSettle();
+
+        expect(lookedUpVin, '5NPD84LF0KH412345');
+        expect(feedback.playCount, 1);
+        expect(find.text('2022 Ford Explorer'), findsOneWidget);
+        expect(find.text('5W-30'), findsOneWidget);
+        expect(find.text('VO-115'), findsOneWidget);
+      },
+    );
+  });
+
+  group('ScannerScreen OCR mode & HUD toggles', () {
+    testWidgets(
+      'switches between Barcode and OCR modes, updates Strictness, and plays beep on OCR VIN lock',
+      (tester) async {
+        final controller = VinLookupController(
+          service: _FakeVinLookupService((_) async => _explorerResult()),
+        );
+        final feedback = _FakeFeedbackService();
+        final fakeOcr = _FakeOcrService();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.darkTheme,
+            home: ScannerScreen(
+              vinController: controller,
+              validator: const VinValidator(),
+              themeMode: ThemeMode.dark,
+              onCycleThemeMode: () {},
+              feedbackService: feedback,
+              ocrService: fakeOcr,
+              cameraScannerSupportedOverride: true,
+              ocrViewBuilder: (
+                context, {
+                required ocrService,
+                required validator,
+                required strictness,
+                required scanWindow,
+                required isPaused,
+                required onVinRecognized,
+                required onManualEntryTap,
+                required onSwitchStrictnessToNormal,
+              }) {
+                return ColoredBox(
+                  color: Colors.black,
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Text('Mock OCR (${strictness.name})'),
+                        FilledButton(
+                          onPressed: () =>
+                              onVinRecognized('1FM5K8GCXNGA77516'),
+                          child: const Text('Simulate OCR Read'),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.text('Barcode'), findsOneWidget);
+        expect(find.text('OCR'), findsOneWidget);
+        expect(find.text('Normal'), findsOneWidget);
+        expect(find.text('Strict'), findsOneWidget);
+
+        // Switch to OCR mode.
+        await tester.tap(find.text('OCR'));
+        await tester.pumpAndSettle();
+        expect(find.text('Mock OCR (normal)'), findsOneWidget);
+
+        // Toggle strictness to Strict while in OCR mode.
+        await tester.tap(find.text('Strict'));
+        await tester.pump();
+        expect(find.text('Mock OCR (strict)'), findsOneWidget);
+
+        // Simulate successful OCR VIN recognition -> instant BEEP + full spec screen.
+        await tester.tap(find.text('Simulate OCR Read'));
         await tester.pumpAndSettle();
 
         expect(feedback.playCount, 1);

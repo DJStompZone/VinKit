@@ -6,7 +6,8 @@ import 'package:vinkit_app/services/vin_validator.dart';
 /// barcode scanning is unavailable (such as Windows and Linux).
 ///
 /// Supports direct typing, clipboard pasting, and USB/Bluetooth keyboard-wedge
-/// barcode scanners (including Code 39 leading `I` and `*` sentinels).
+/// barcode scanners (including Code 39 leading `I`, `*` sentinels, and
+/// flexible Normal-mode extraction of trailing characters such as Elantra `A`).
 class DesktopVinEntryView extends StatefulWidget {
   /// Creates a [DesktopVinEntryView].
   const DesktopVinEntryView({
@@ -15,6 +16,8 @@ class DesktopVinEntryView extends StatefulWidget {
     required this.onSubmitVin,
     required this.themeMode,
     required this.onCycleThemeMode,
+    this.strictness = VinScanStrictness.normal,
+    this.onStrictnessChanged,
   });
 
   /// Validator used to normalize and validate VIN entries and barcode payloads.
@@ -28,6 +31,12 @@ class DesktopVinEntryView extends StatefulWidget {
 
   /// Callback cycling between system, light, and dark themes.
   final VoidCallback onCycleThemeMode;
+
+  /// Active barcode matching strictness (`Normal` or `Strict`).
+  final VinScanStrictness strictness;
+
+  /// Callback invoked when the user switches matching strictness.
+  final ValueChanged<VinScanStrictness>? onStrictnessChanged;
 
   @override
   State<DesktopVinEntryView> createState() => _DesktopVinEntryViewState();
@@ -54,7 +63,10 @@ class _DesktopVinEntryViewState extends State<DesktopVinEntryView> {
     if (direct.isValid) {
       return direct.normalizedVin;
     }
-    return widget.validator.extractFromBarcode(raw);
+    return widget.validator.extractFromBarcode(
+      raw,
+      strictness: widget.strictness,
+    );
   }
 
   Future<void> _pasteFromClipboard() async {
@@ -63,7 +75,10 @@ class _DesktopVinEntryViewState extends State<DesktopVinEntryView> {
     if (!mounted || raw == null || raw.trim().isEmpty) {
       return;
     }
-    final extracted = widget.validator.extractFromBarcode(raw);
+    final extracted = widget.validator.extractFromBarcode(
+      raw,
+      strictness: widget.strictness,
+    );
     final normalized = extracted ?? widget.validator.normalizeManualInput(raw);
     _controller.value = TextEditingValue(
       text: normalized,
@@ -186,6 +201,45 @@ class _DesktopVinEntryViewState extends State<DesktopVinEntryView> {
                         ),
                       ],
                     ),
+                    if (widget.onStrictnessChanged != null) ...<Widget>[
+                      const SizedBox(height: 16),
+                      Wrap(
+                        alignment: WrapAlignment.spaceBetween,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 12,
+                        runSpacing: 8,
+                        children: <Widget>[
+                          Text(
+                            'Scan Strictness',
+                            style: theme.textTheme.labelLarge?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          SegmentedButton<VinScanStrictness>(
+                            showSelectedIcon: false,
+                            style: const ButtonStyle(
+                              visualDensity: VisualDensity.compact,
+                            ),
+                            segments: const <ButtonSegment<VinScanStrictness>>[
+                              ButtonSegment<VinScanStrictness>(
+                                value: VinScanStrictness.normal,
+                                label: Text('Normal'),
+                              ),
+                              ButtonSegment<VinScanStrictness>(
+                                value: VinScanStrictness.strict,
+                                label: Text('Strict'),
+                              ),
+                            ],
+                            selected: <VinScanStrictness>{widget.strictness},
+                            onSelectionChanged: (selection) {
+                              if (selection.isNotEmpty) {
+                                widget.onStrictnessChanged!(selection.first);
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 20),
                     TextField(
                       controller: _controller,
@@ -281,7 +335,7 @@ class _DesktopVinEntryViewState extends State<DesktopVinEntryView> {
                             const SizedBox(width: 10),
                             Expanded(
                               child: Text(
-                                'Live camera scanning is available on Android, iOS, and macOS. Desktop mode supports keyboard, clipboard, and USB barcode scanners.',
+                                'Live camera scanning and on-device PaddleOCR v5 OCR are available on Android and iOS. Desktop mode supports keyboard, clipboard, and USB barcode scanners.',
                                 style: theme.textTheme.bodySmall?.copyWith(
                                   color: colorScheme.onSurfaceVariant,
                                 ),

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:vinkit_app/models/json_parsers.dart';
 import 'package:vinkit_app/models/vin_lookup_exception.dart';
 import 'package:vinkit_app/models/vin_lookup_result.dart';
@@ -23,7 +24,7 @@ class StompZoneVinService implements VinLookupService {
               BaseOptions(
                 connectTimeout: const Duration(seconds: 10),
                 receiveTimeout: const Duration(seconds: 15),
-                sendTimeout: const Duration(seconds: 10),
+                sendTimeout: kIsWeb ? null : const Duration(seconds: 10),
                 headers: const <String, String>{
                   'Accept': 'application/json',
                 },

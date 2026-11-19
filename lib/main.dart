@@ -4,6 +4,7 @@ import 'package:vinkit_app/services/scanner_feedback_service.dart';
 import 'package:vinkit_app/services/stomp_zone_vin_service.dart';
 import 'package:vinkit_app/services/vin_lookup_controller.dart';
 import 'package:vinkit_app/services/vin_lookup_service.dart';
+import 'package:vinkit_app/services/vin_ocr_service.dart';
 import 'package:vinkit_app/services/vin_validator.dart';
 import 'package:vinkit_app/theme/app_theme.dart';
 
@@ -21,17 +22,21 @@ class VinKitApp extends StatefulWidget {
     this.vinLookupService,
     this.validator = const VinValidator(),
     this.feedbackService = const PlatformScannerFeedbackService(),
+    this.ocrService,
     this.initialThemeMode = ThemeMode.system,
   });
 
   /// Optional [VinLookupService] override; defaults to [StompZoneVinService].
   final VinLookupService? vinLookupService;
 
-  /// Validator instance shared across scanner and manual VIN entry flows.
+  /// Validator instance shared across scanner, OCR, and manual VIN entry flows.
   final VinValidator validator;
 
   /// Service playing audible beep and haptic feedback on valid VIN scans.
   final ScannerFeedbackService feedbackService;
+
+  /// Optional on-device OCR service override (defaults to `mobile_ocr` on Android/iOS).
+  final VinOcrService? ocrService;
 
   /// Initial Material theme mode.
   final ThemeMode initialThemeMode;
@@ -92,6 +97,7 @@ class _VinKitAppState extends State<VinKitApp> {
         themeMode: _themeMode,
         onCycleThemeMode: _cycleThemeMode,
         feedbackService: widget.feedbackService,
+        ocrService: widget.ocrService,
       ),
     );
   }
