@@ -181,5 +181,147 @@ void main() {
       expect(result.matchedPartsVehicle!.matchType, 'canonical_exact_disp');
       expect(result.matchedPartsVehicle!.matchScore, 132);
     });
+
+    test('parses wiper lengths, connectors, battery specs, fluid codes, and summary', () {
+      final json = <String, dynamic>{
+        'vehicle': <String, dynamic>{
+          'id': 31821,
+          'year': 2022,
+          'make': 'Ford',
+          'model': 'Explorer',
+          'trim': 'ST',
+          'engine': '3.0L V6 GTDI',
+        },
+        'parts_by_category': <String, dynamic>{
+          'oil_filter': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'category': 'oil_filter',
+              'position': '',
+              'brand': 'Valvoline (STANDARD)',
+              'part_number': 'VO-115',
+              'detail': 'Engine Oil Filter',
+              'source': 'Valvoline Catalog',
+              'verified': true,
+            },
+          ],
+          'fuel_filter': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'category': 'fuel_filter',
+              'position': '',
+              'brand': 'Valvoline',
+              'part_number': 'NS',
+              'detail': 'Non Serviceable',
+              'source': 'Valvoline Catalog',
+              'verified': true,
+            },
+          ],
+          'wiper': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'category': 'wiper',
+              'position': 'rear',
+              'brand': 'Valvoline (REAR BLADE)',
+              'part_number': '873271',
+              'detail': 'REAR | 11 in.; Arm Connector: U-Clip 8.5mm; Original (OEM): Beam',
+              'source': 'Valvoline Catalog',
+              'verified': true,
+            },
+            <String, dynamic>{
+              'category': 'wiper',
+              'position': 'driver',
+              'brand': 'Valvoline (BEAM BLADE)',
+              'part_number': '836539',
+              'detail': 'FRONT LEFT | 26 in.; Arm Connector: PT 15; Original (OEM): Beam',
+              'source': 'Valvoline Catalog',
+              'verified': true,
+            },
+          ],
+          'battery': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'category': 'battery',
+              'position': '',
+              'brand': 'Valvoline Battery (VALVOLINE)',
+              'part_number': '48AGM-V',
+              'detail': 'AGM Valve-Regulated Battery Required.; Part CCA: 760; OE Group: 48',
+              'source': 'Valvoline Catalog',
+              'verified': true,
+            },
+          ],
+        },
+        'oil_specs': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'origin': 'Valvoline',
+            'viscosity': '5W-20',
+            'oil_type': 'synthetic',
+            'capacity_qt': 4.5,
+            'spec_notes': 'Full Synthetic SAE 5W-20',
+            'source': 'Valvoline Product Finder',
+            'verified': true,
+          },
+          <String, dynamic>{
+            'origin': 'Valvoline',
+            'viscosity': '0W-20',
+            'oil_type': 'maxlife',
+            'capacity_qt': 4.5,
+            'spec_notes': 'MaxLife SAE 0W-20',
+            'source': 'Valvoline Product Finder',
+            'verified': true,
+          },
+        ],
+        'services': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'service': 'Cooling system',
+            'origin': 'Valvoline',
+            'notes': 'Multi-Vehicle Antifreeze / Coolant (Codes: ["719009", "719005"])',
+            'source': 'Valvoline Product Finder',
+            'verified': true,
+          },
+        ],
+        'vf_matches': <dynamic>[],
+        'vin': '1FM5K8GCXNGA77516',
+      };
+
+      final result = VinLookupResult.fromJson(
+        json,
+        fallbackVin: '1FM5K8GCXNGA77516',
+      );
+
+      expect(result.oilViscosities, <String>['5W-20', '0W-20']);
+      expect(result.oilCapacities, <String>['4.5 qt']);
+      expect(
+        result.orderedFilterCategories,
+        <String>['oil_filter', 'fuel_filter'],
+      );
+      expect(result.otherPartCategories, <String>['battery']);
+      expect(result.partsByCategory['fuel_filter']!.single.isNonServiceable, isTrue);
+
+      final wipers = result.wipersByPosition;
+      expect(wipers.keys.toList(), <String>['driver', 'rear']);
+      final driverWiper = wipers['driver']!.single;
+      expect(driverWiper.wiperLengthLabel, '26"');
+      expect(driverWiper.armConnectorLabel, 'PT 15');
+      expect(driverWiper.oemTypeLabel, 'Beam');
+      expect(driverWiper.brandTierLabel, 'Beam Blade');
+
+      final battery = result.partsByCategory['battery']!.single;
+      expect(
+        battery.specKeyValues.map((e) => '${e.key}=${e.value}').toList(),
+        <String>['Part CCA=760', 'OE Group=48'],
+      );
+      expect(
+        battery.proseDetailSegments,
+        <String>['AGM Valve-Regulated Battery Required.'],
+      );
+
+      final coolant = result.services.single;
+      expect(coolant.cleanNotes, 'Multi-Vehicle Antifreeze / Coolant');
+      expect(coolant.productCodes, <String>['719009', '719005']);
+
+      final summary = result.toPlainTextSummary();
+      expect(summary, contains('2022 Ford Explorer ST'));
+      expect(summary, contains('5W-20 / 0W-20'));
+      expect(summary, contains('VO-115'));
+      expect(summary, contains('26"'));
+      expect(summary, contains('48AGM-V'));
+    });
   });
 }

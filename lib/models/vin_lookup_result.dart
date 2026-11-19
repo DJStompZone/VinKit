@@ -331,7 +331,7 @@ class VinLookupResult {
             .join(', ');
         final connector = first.armConnectorLabel;
         final details = <String>[
-          if (size != null) size,
+          ?size,
           parts,
           if (connector != null) 'Connector: $connector',
         ];

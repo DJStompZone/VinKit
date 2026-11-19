@@ -14,15 +14,16 @@ abstract interface class ScannerFeedbackService {
 class PlatformScannerFeedbackService implements ScannerFeedbackService {
   /// Creates a [PlatformScannerFeedbackService] using [channel].
   const PlatformScannerFeedbackService({
-    MethodChannel channel = defaultChannel,
-  }) : _channel = channel;
+    this.channel = defaultChannel,
+  });
 
   /// Method channel implemented on Android and iOS for scanner confirmation tones.
   static const MethodChannel defaultChannel = MethodChannel(
     'zone.stomp.vinkit/scanner_feedback',
   );
 
-  final MethodChannel _channel;
+  /// Platform method channel invoked for scanner confirmation tones.
+  final MethodChannel channel;
 
   @override
   Future<void> playValidScanFeedback() async {
@@ -34,7 +35,7 @@ class PlatformScannerFeedbackService implements ScannerFeedbackService {
 
   Future<void> _playBeep() async {
     try {
-      await _channel.invokeMethod<void>('playScanBeep');
+      await channel.invokeMethod<void>('playScanBeep');
     } on MissingPluginException {
       await _fallbackSystemSound();
     } on PlatformException {

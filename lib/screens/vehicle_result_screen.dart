@@ -427,65 +427,58 @@ class _VehicleIdentityBanner extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: colorScheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: colorScheme.primary.withValues(alpha: 0.45),
           width: 1.5,
         ),
       ),
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            runSpacing: 4,
             children: <Widget>[
-              Expanded(
-                child: Wrap(
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: <Widget>[
-                    Text(
-                      headline,
-                      style: theme.textTheme.headlineSmall?.copyWith(
-                        fontWeight: FontWeight.w800,
-                        height: 1.15,
-                        letterSpacing: -0.3,
-                      ),
-                    ),
-                    if (vehicle.trim.isNotEmpty)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: colorScheme.primary,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          vehicle.trim,
-                          style: theme.textTheme.labelMedium?.copyWith(
-                            color: colorScheme.onPrimary,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ),
-                  ],
+              Text(
+                headline,
+                style: theme.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  height: 1.15,
+                  letterSpacing: -0.2,
                 ),
               ),
+              if (vehicle.trim.isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: colorScheme.primary,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    vehicle.trim,
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: colorScheme.onPrimary,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
             ],
           ),
           if (vehicle.engine.isNotEmpty ||
               (primaryMatch != null &&
                   primaryMatch.engineRaw.isNotEmpty)) ...<Widget>[
-            const SizedBox(height: 4),
+            const SizedBox(height: 3),
             Row(
               children: <Widget>[
                 Icon(
                   Icons.engineering_rounded,
-                  size: 16,
+                  size: 15,
                   color: colorScheme.primary,
                 ),
                 const SizedBox(width: 6),
@@ -503,7 +496,7 @@ class _VehicleIdentityBanner extends StatelessWidget {
               ],
             ),
           ],
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           _InlineVinStrip(vin: result.vin),
         ],
       ),
@@ -529,7 +522,7 @@ class _InlineVinStrip extends StatelessWidget {
           color: colorScheme.outlineVariant.withValues(alpha: 0.75),
         ),
       ),
-      padding: const EdgeInsets.only(left: 10, right: 4, top: 2, bottom: 2),
+      padding: const EdgeInsets.only(left: 10, right: 4, top: 1, bottom: 1),
       child: Row(
         children: <Widget>[
           Text(
@@ -547,7 +540,7 @@ class _InlineVinStrip extends StatelessWidget {
               style: theme.textTheme.bodyMedium?.copyWith(
                 fontFamily: 'monospace',
                 fontWeight: FontWeight.w700,
-                letterSpacing: 1.1,
+                letterSpacing: 0.9,
               ),
             ),
           ),
@@ -579,12 +572,12 @@ class _RecommendedOilBanner extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: colorScheme.primaryContainer.withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: colorScheme.primary.withValues(alpha: 0.45),
         ),
       ),
-      padding: const EdgeInsets.fromLTRB(12, 9, 12, 10),
+      padding: const EdgeInsets.fromLTRB(12, 7, 12, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -592,30 +585,35 @@ class _RecommendedOilBanner extends StatelessWidget {
             children: <Widget>[
               Icon(
                 Icons.opacity_rounded,
-                size: 16,
+                size: 15,
                 color: colorScheme.primary,
               ),
               const SizedBox(width: 6),
-              Text(
-                'RECOMMENDED OIL',
-                style: theme.textTheme.labelMedium?.copyWith(
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.7,
-                  color: colorScheme.primary,
+              Expanded(
+                child: Text(
+                  'RECOMMENDED OIL',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                    color: colorScheme.primary,
+                  ),
                 ),
               ),
-              const Spacer(),
-              if (result.oilSpecs.length > 1)
+              if (result.oilSpecs.length > 1) ...<Widget>[
+                const SizedBox(width: 8),
                 Text(
-                  '${result.oilSpecs.length} options below',
+                  '${result.oilSpecs.length} options',
                   style: theme.textTheme.labelSmall?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+              ],
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 5),
           if (!hasAnyOil)
             Text(
               'No engine oil specification returned for this VIN.',
@@ -625,19 +623,19 @@ class _RecommendedOilBanner extends StatelessWidget {
             )
           else ...<Widget>[
             Wrap(
-              spacing: 8,
-              runSpacing: 6,
+              spacing: 7,
+              runSpacing: 5,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: <Widget>[
                 for (final grade in viscosities)
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 4,
+                      horizontal: 9,
+                      vertical: 3,
                     ),
                     decoration: BoxDecoration(
                       color: colorScheme.primary,
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(7),
                     ),
                     child: Text(
                       grade,
@@ -645,19 +643,19 @@ class _RecommendedOilBanner extends StatelessWidget {
                         fontFamily: 'monospace',
                         fontWeight: FontWeight.w900,
                         color: colorScheme.onPrimary,
-                        letterSpacing: 0.4,
+                        letterSpacing: 0.3,
                       ),
                     ),
                   ),
                 for (final cap in capacities)
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 4,
+                      horizontal: 9,
+                      vertical: 3,
                     ),
                     decoration: BoxDecoration(
                       color: colorScheme.surface,
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(7),
                       border: Border.all(
                         color: colorScheme.primary.withValues(alpha: 0.5),
                       ),
@@ -670,18 +668,16 @@ class _RecommendedOilBanner extends StatelessWidget {
                       ),
                     ),
                   ),
+                if (types.isNotEmpty)
+                  Text(
+                    types.join(' • '),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: colorScheme.onSurface,
+                    ),
+                  ),
               ],
             ),
-            if (types.isNotEmpty) ...<Widget>[
-              const SizedBox(height: 6),
-              Text(
-                types.join(' • '),
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  color: colorScheme.onSurface,
-                ),
-              ),
-            ],
             if (singleSpec != null && singleSpec.specNotes.isNotEmpty) ...<Widget>[
               const SizedBox(height: 3),
               Text(
@@ -734,7 +730,7 @@ class _FiltersSpecCard extends StatelessWidget {
           : null,
       child: filterCategories.isEmpty
           ? Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
+              padding: const EdgeInsets.symmetric(vertical: 2),
               child: Text(
                 'No filter catalog data returned for this VIN.',
                 style: theme.textTheme.bodySmall?.copyWith(
@@ -752,7 +748,7 @@ class _FiltersSpecCard extends StatelessWidget {
                     parts: result.partsByCategory[filterCategories[i]]!,
                   ),
                   if (i < filterCategories.length - 1)
-                    const Divider(height: 12),
+                    const Divider(height: 8),
                 ],
               ],
             ),
@@ -793,13 +789,13 @@ class _FilterCategoryRow extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         SizedBox(
-          width: 108,
+          width: 102,
           child: Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.only(top: 3),
             child: Row(
               children: <Widget>[
-                Icon(icon, size: 16, color: colorScheme.primary),
-                const SizedBox(width: 6),
+                Icon(icon, size: 15, color: colorScheme.primary),
+                const SizedBox(width: 5),
                 Expanded(
                   child: Text(
                     label,
@@ -812,7 +808,7 @@ class _FilterCategoryRow extends StatelessWidget {
             ),
           ),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: 6),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -822,7 +818,7 @@ class _FilterCategoryRow extends StatelessWidget {
                   part: parts[i],
                   usefulDetail: _usefulDetailFor(parts[i]),
                 ),
-                if (i < parts.length - 1) const SizedBox(height: 6),
+                if (i < parts.length - 1) const SizedBox(height: 4),
               ],
             ],
           ),
@@ -846,17 +842,14 @@ class _CompactFilterEntry extends StatelessWidget {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final tier = part.brandTierLabel;
-    final subTokens = <String>[
-      if (tier.isNotEmpty) tier else if (part.brand.isNotEmpty) part.brand,
-      if (usefulDetail.isNotEmpty) usefulDetail,
-    ];
+    final inlineBrand = tier.isNotEmpty ? tier : part.brand;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         Wrap(
           spacing: 6,
-          runSpacing: 4,
+          runSpacing: 3,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: <Widget>[
             if (part.partNumber.isNotEmpty)
@@ -865,19 +858,27 @@ class _CompactFilterEntry extends StatelessWidget {
                 muted: part.isNonServiceable,
                 prominent: !part.isNonServiceable,
               ),
+            if (inlineBrand.isNotEmpty)
+              Text(
+                inlineBrand,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             if (part.verified)
               Icon(
                 Icons.verified_rounded,
-                size: 15,
+                size: 14,
                 color: colorScheme.primary,
               ),
           ],
         ),
-        if (subTokens.isNotEmpty) ...<Widget>[
+        if (usefulDetail.isNotEmpty) ...<Widget>[
           const SizedBox(height: 2),
           Text(
-            subTokens.join(' • '),
-            style: theme.textTheme.bodySmall?.copyWith(
+            usefulDetail,
+            style: theme.textTheme.labelSmall?.copyWith(
               color: colorScheme.onSurfaceVariant,
               height: 1.2,
             ),
@@ -906,7 +907,7 @@ class _WipersSpecCard extends StatelessWidget {
           grouped.isNotEmpty ? '${grouped.length} positions' : null,
       child: grouped.isEmpty
           ? Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
+              padding: const EdgeInsets.symmetric(vertical: 2),
               child: Text(
                 'No wiper blade catalog data returned for this VIN.',
                 style: theme.textTheme.bodySmall?.copyWith(
@@ -921,7 +922,7 @@ class _WipersSpecCard extends StatelessWidget {
                     positionKey: grouped.keys.elementAt(i),
                     parts: grouped.values.elementAt(i),
                   ),
-                  if (i < grouped.length - 1) const Divider(height: 12),
+                  if (i < grouped.length - 1) const Divider(height: 8),
                 ],
               ],
             ),
@@ -950,19 +951,21 @@ class _WiperPositionRow extends StatelessWidget {
     final connector = first.armConnectorLabel;
     final oem = first.oemTypeLabel;
     final metaTokens = <String>[
-      if (connector != null) 'Connector: $connector',
-      if (oem != null) 'OEM: $oem',
+      ?connector,
+      if (oem != null) 'OEM $oem',
     ];
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         SizedBox(
-          width: 108,
+          width: 112,
           child: Padding(
-            padding: const EdgeInsets.only(top: 3),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            padding: const EdgeInsets.only(top: 2),
+            child: Wrap(
+              spacing: 5,
+              runSpacing: 2,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: <Widget>[
                 Text(
                   positionTitle,
@@ -970,38 +973,37 @@ class _WiperPositionRow extends StatelessWidget {
                     fontWeight: FontWeight.w700,
                   ),
                 ),
-                if (size != null) ...<Widget>[
-                  const SizedBox(height: 2),
+                if (size != null)
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 7,
+                      horizontal: 6,
                       vertical: 1,
                     ),
                     decoration: BoxDecoration(
                       color: colorScheme.tertiaryContainer,
-                      borderRadius: BorderRadius.circular(6),
+                      borderRadius: BorderRadius.circular(5),
                     ),
                     child: Text(
                       size,
-                      style: theme.textTheme.titleSmall?.copyWith(
+                      style: theme.textTheme.labelLarge?.copyWith(
                         fontWeight: FontWeight.w900,
                         color: colorScheme.onTertiaryContainer,
                       ),
                     ),
                   ),
-                ],
               ],
             ),
           ),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: 6),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               Wrap(
-                spacing: 6,
-                runSpacing: 6,
+                spacing: 5,
+                runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: <Widget>[
                   for (final part in parts)
                     _CopyableCodePill(
@@ -1013,19 +1015,19 @@ class _WiperPositionRow extends StatelessWidget {
                 ],
               ),
               if (metaTokens.isNotEmpty) ...<Widget>[
-                const SizedBox(height: 4),
+                const SizedBox(height: 2),
                 Text(
                   metaTokens.join(' • '),
-                  style: theme.textTheme.bodySmall?.copyWith(
+                  style: theme.textTheme.labelSmall?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                     height: 1.2,
                   ),
                 ),
               ] else if (first.detail.isNotEmpty) ...<Widget>[
-                const SizedBox(height: 4),
+                const SizedBox(height: 2),
                 Text(
                   first.detailSegments.join(' • '),
-                  style: theme.textTheme.bodySmall?.copyWith(
+                  style: theme.textTheme.labelSmall?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                   ),
                 ),
@@ -1679,25 +1681,28 @@ class _SpecSectionCard extends StatelessWidget {
 
     return Card(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 9, 12, 10),
+        padding: const EdgeInsets.fromLTRB(12, 7, 12, 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Row(
               children: <Widget>[
-                Icon(icon, size: 16, color: colorScheme.primary),
+                Icon(icon, size: 15, color: colorScheme.primary),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
                     title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.labelMedium?.copyWith(
                       fontWeight: FontWeight.w800,
-                      letterSpacing: 0.7,
+                      letterSpacing: 0.6,
                       color: colorScheme.primary,
                     ),
                   ),
                 ),
-                if (trailing != null)
+                if (trailing != null) ...<Widget>[
+                  const SizedBox(width: 8),
                   Text(
                     trailing!,
                     style: theme.textTheme.labelSmall?.copyWith(
@@ -1705,9 +1710,10 @@ class _SpecSectionCard extends StatelessWidget {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
+                ],
               ],
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             child,
           ],
         ),

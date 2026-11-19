@@ -6,10 +6,11 @@ A production-ready multiplatform Flutter mobile application (targeting Android a
 
 - **Automotive VIN Barcode Scanner:** Live full-screen camera preview powered by `mobile_scanner`, tuned for `BarcodeFormat.code39` and `BarcodeFormat.code128` linear barcodes with a semi-transparent horizontal viewfinder cutout.
 - **Legacy Code 39 Prefix Handling:** Automatically strips Code 39 `*` sentinels and the 18-character leading `I` prefix emitted by older automotive VIN barcodes before validation.
-- **Scanner Controls:** Flashlight/torch toggle, `1x` / `2x` zoom presets plus continuous zoom slider for small windshield stickers, haptic feedback (`HapticFeedback.mediumImpact()`), and automatic scanner pause/resume across result sheets and app lifecycle transitions.
+- **Instant Scan Lock & Confirmation Beep:** The instant a valid 17-character VIN barcode is detected, VinKit plays a crisp native scanner beep + haptic pulse, stops the camera scanner immediately, and opens the full-screen Vehicle Spec Sheet.
+- **Scanner Controls:** Flashlight/torch toggle, `1x` / `2x` zoom presets plus continuous zoom slider for small windshield stickers, and automatic camera stop/resume across the spec screen and app lifecycle transitions.
 - **Manual VIN Entry Fallback:** Modal bottom sheet with auto-uppercasing, live `X / 17` character counter, one-tap clipboard paste, and instant inline validation.
 - **Pre-Request VIN Validation:** Enforces exact 17-character alphanumeric format excluding `I`, `O`, and `Q` before issuing network requests.
-- **Custom VIN Backend Integration:** Queries `https://vin.stomp.zone/api/v1/vin/{VIN}` via `dio` and presents decoded vehicle summaries, one-tap copyable raw VIN and part numbers, categorized parts (oil/air/cabin/fuel filters, battery, wiper blades), oil viscosity and quart capacity options, and fluid service schedules in Material 3 cards.
+- **High-Density Full-Screen Vehicle Spec Sheet:** Queries `https://vin.stomp.zone/api/v1/vin/{VIN}` via `dio` and immediately displays Year, Make, Model, Trim, Engine, VIN, Recommended Oil viscosity/capacity, Filters, and Wiper Blade sizes/connectors above the fold, followed by Battery specs, all oil options, fluid services with copyable product codes, powertrain/catalog match details, and one-tap **Copy All Specs**.
 - **Resilient Error & Permission Handling:** Graceful handling for network failures, timeouts, HTTP 400/404 unrecognized VINs, and runtime camera permission denials with an **Open App Settings** prompt (`permission_handler`) plus retry and manual-entry fallbacks.
 - **Material 3 Light & Dark Themes:** Full `useMaterial3: true` support with system default and an in-app theme toggle.
 
@@ -30,8 +31,10 @@ lib/
 │   ├── vin_lookup_result.dart        # Aggregated API response model
 │   └── vin_lookup_state.dart         # Sealed idle/loading/success/failure states
 ├── screens/
-│   └── scanner_screen.dart           # Camera scanner screen, lifecycle, and sheet flow
+│   ├── scanner_screen.dart           # Camera scanner screen, instant beep/stop, navigation
+│   └── vehicle_result_screen.dart    # Full-screen high-density vehicle spec sheet
 ├── services/
+│   ├── scanner_feedback_service.dart # Native scanner beep & haptic confirmation service
 │   ├── stomp_zone_vin_service.dart   # Dio-backed vin.stomp.zone API service
 │   ├── vin_lookup_controller.dart    # ChangeNotifier coordinating validation & lookups
 │   ├── vin_lookup_service.dart       # Abstract interface for swapping VIN backends
@@ -42,8 +45,7 @@ lib/
     ├── camera_permission_view.dart   # Camera denial/error UI with Settings shortcut
     ├── manual_vin_sheet.dart         # Manual VIN entry & clipboard paste modal sheet
     ├── scanner_controls.dart         # Zoom slider, 1x/2x presets, torch, manual trigger
-    ├── scanner_overlay.dart          # CustomPainter horizontal barcode cutout mask
-    └── vehicle_result_sheet.dart     # Scrollable Material 3 vehicle & parts result sheet
+    └── scanner_overlay.dart          # CustomPainter horizontal barcode cutout mask
 ```
 
 ## Swapping the VIN Backend

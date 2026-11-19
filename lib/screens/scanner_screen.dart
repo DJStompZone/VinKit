@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:vinkit_app/screens/vehicle_result_screen.dart';
@@ -8,11 +10,15 @@ import 'package:vinkit_app/services/scanner_feedback_service.dart';
 import 'package:vinkit_app/services/vin_lookup_controller.dart';
 import 'package:vinkit_app/services/vin_validator.dart';
 import 'package:vinkit_app/widgets/camera_permission_view.dart';
+import 'package:vinkit_app/widgets/desktop_vin_entry_view.dart';
 import 'package:vinkit_app/widgets/manual_vin_sheet.dart';
 import 'package:vinkit_app/widgets/scanner_controls.dart';
 import 'package:vinkit_app/widgets/scanner_overlay.dart';
 
 /// Primary live camera barcode scanning screen for automotive VIN barcodes.
+///
+/// Automatically falls back to [DesktopVinEntryView] on desktop targets
+/// (Windows and Linux) where `mobile_scanner` has no native camera plugin.
 class ScannerScreen extends StatefulWidget {
   /// Creates a [ScannerScreen].
   const ScannerScreen({
@@ -22,6 +28,7 @@ class ScannerScreen extends StatefulWidget {
     required this.themeMode,
     required this.onCycleThemeMode,
     this.feedbackService = const PlatformScannerFeedbackService(),
+    this.cameraScannerSupportedOverride,
   });
 
   /// Controller orchestrating VIN lookups and result states.
@@ -39,13 +46,34 @@ class ScannerScreen extends StatefulWidget {
   /// Service playing audible beep and haptic confirmation on valid VIN scans.
   final ScannerFeedbackService feedbackService;
 
+  /// Optional platform capability override used by widget tests.
+  final bool? cameraScannerSupportedOverride;
+
+  /// Whether `mobile_scanner` provides a native implementation on the current
+  /// platform (`android`, `ios`, `macos`, `web`).
+  static bool isCameraScannerSupported() {
+    if (kIsWeb) {
+      return true;
+    }
+    return switch (defaultTargetPlatform) {
+      TargetPlatform.android ||
+      TargetPlatform.iOS ||
+      TargetPlatform.macOS =>
+        true,
+      TargetPlatform.windows ||
+      TargetPlatform.linux ||
+      TargetPlatform.fuchsia =>
+        false,
+    };
+  }
+
   @override
   State<ScannerScreen> createState() => _ScannerScreenState();
 }
 
 class _ScannerScreenState extends State<ScannerScreen>
     with WidgetsBindingObserver {
-  late final MobileScannerController _scannerController;
+  MobileScannerController? _scannerController;
 
   double _zoomScale = 0.0;
   bool _isScanLocked = false;
@@ -53,21 +81,30 @@ class _ScannerScreenState extends State<ScannerScreen>
   DateTime? _lastInvalidBannerAt;
   Timer? _statusTimer;
 
+  bool get _supportsCameraScanner =>
+      widget.cameraScannerSupportedOverride ??
+      ScannerScreen.isCameraScannerSupported();
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _scannerController = MobileScannerController(
-      formats: const <BarcodeFormat>[
-        BarcodeFormat.code39,
-        BarcodeFormat.code128,
-      ],
-      detectionSpeed: DetectionSpeed.normal,
-    );
+    if (_supportsCameraScanner) {
+      _scannerController = MobileScannerController(
+        formats: const <BarcodeFormat>[
+          BarcodeFormat.code39,
+          BarcodeFormat.code128,
+        ],
+        detectionSpeed: DetectionSpeed.normal,
+      );
+    }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_scannerController == null) {
+      return;
+    }
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
       unawaited(_pauseCamera());
@@ -77,70 +114,97 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   Future<void> _pauseCamera() async {
-    final scannerState = _scannerController.value;
+    final controller = _scannerController;
+    if (controller == null) {
+      return;
+    }
+    final scannerState = controller.value;
     if (!scannerState.isInitialized || !scannerState.isRunning) {
       return;
     }
     try {
-      await _scannerController.pause();
+      await controller.pause();
     } on MobileScannerException catch (error) {
       debugPrint('Failed to pause camera: ${error.errorCode}');
+    } on MissingPluginException {
+      // No native scanner plugin on this platform.
     }
   }
 
   Future<void> _stopScanning() async {
-    final scannerState = _scannerController.value;
+    final controller = _scannerController;
+    if (controller == null) {
+      return;
+    }
+    final scannerState = controller.value;
     if (!scannerState.isInitialized && !scannerState.isRunning) {
       return;
     }
     try {
-      await _scannerController.stop();
+      await controller.stop();
     } on MobileScannerException catch (error) {
       debugPrint('Failed to stop scanner: ${error.errorCode}');
+    } on MissingPluginException {
+      // No native scanner plugin on this platform.
     }
   }
 
   Future<void> _resumeCamera() async {
-    if (!mounted || _isScanLocked) {
+    final controller = _scannerController;
+    if (controller == null || !mounted || _isScanLocked) {
       return;
     }
-    final scannerState = _scannerController.value;
+    final scannerState = controller.value;
     if (scannerState.isRunning || scannerState.isStarting) {
       return;
     }
     try {
-      await _scannerController.start();
+      await controller.start();
       if (mounted && !_isScanLocked && _zoomScale > 0.0) {
-        await _scannerController.setZoomScale(_zoomScale);
+        await controller.setZoomScale(_zoomScale);
       }
     } on MobileScannerException catch (error) {
       debugPrint('Failed to resume camera: ${error.errorCode}');
+    } on MissingPluginException {
+      // No native scanner plugin on this platform.
     }
   }
 
   Future<void> _setZoomScale(double zoom) async {
     final clamped = zoom.clamp(0.0, 1.0);
     setState(() => _zoomScale = clamped);
-    final scannerState = _scannerController.value;
+    final controller = _scannerController;
+    if (controller == null) {
+      return;
+    }
+    final scannerState = controller.value;
     if (!scannerState.isInitialized || !scannerState.isRunning) {
       return;
     }
     try {
-      await _scannerController.setZoomScale(clamped);
+      await controller.setZoomScale(clamped);
     } on MobileScannerException catch (error) {
       debugPrint('Failed to update zoom: ${error.errorCode}');
+    } on MissingPluginException {
+      // No native scanner plugin on this platform.
     }
   }
 
   Future<void> _toggleTorch() async {
-    final scannerState = _scannerController.value;
+    final controller = _scannerController;
+    if (controller == null) {
+      return;
+    }
+    final scannerState = controller.value;
     if (!scannerState.isInitialized || !scannerState.isRunning) {
       return;
     }
     try {
-      await _scannerController.toggleTorch();
+      await controller.toggleTorch();
     } on MobileScannerException catch (error) {
       debugPrint('Failed to toggle torch: ${error.errorCode}');
+    } on MissingPluginException {
+      // No native scanner plugin on this platform.
     }
   }
 
@@ -247,7 +311,11 @@ class _ScannerScreenState extends State<ScannerScreen>
     widget.vinController.reset();
 
     if (closeAction == VehicleResultAction.enterDifferentVin) {
-      await _openManualEntrySheet(initialVin: vin, alreadyLocked: true);
+      if (_supportsCameraScanner) {
+        await _openManualEntrySheet(initialVin: vin, alreadyLocked: true);
+        return;
+      }
+      setState(() => _isScanLocked = false);
       return;
     }
 
@@ -275,12 +343,28 @@ class _ScannerScreenState extends State<ScannerScreen>
   void dispose() {
     _statusTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
-    unawaited(_scannerController.dispose());
+    final controller = _scannerController;
+    if (controller != null) {
+      unawaited(controller.dispose());
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final controller = _scannerController;
+    if (controller == null) {
+      return DesktopVinEntryView(
+        validator: widget.validator,
+        themeMode: widget.themeMode,
+        onCycleThemeMode: widget.onCycleThemeMode,
+        onSubmitVin: (vin) {
+          unawaited(widget.feedbackService.playValidScanFeedback());
+          unawaited(_openVehicleResultScreen(vin));
+        },
+      );
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: LayoutBuilder(
@@ -297,7 +381,7 @@ class _ScannerScreenState extends State<ScannerScreen>
           );
 
           return ValueListenableBuilder<MobileScannerState>(
-            valueListenable: _scannerController,
+            valueListenable: controller,
             builder: (context, scannerState, _) {
               final hasError = scannerState.error != null;
 
@@ -305,7 +389,7 @@ class _ScannerScreenState extends State<ScannerScreen>
                 fit: StackFit.expand,
                 children: <Widget>[
                   MobileScanner(
-                    controller: _scannerController,
+                    controller: controller,
                     scanWindow: scanWindow,
                     fit: BoxFit.cover,
                     onDetect: _onBarcodeDetected,
