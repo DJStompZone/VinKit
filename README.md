@@ -83,3 +83,18 @@ flutter build apk --debug
 flutter build web
 flutter build windows --debug
 ```
+
+## Continuous Integration & Continuous Delivery (GitHub Actions)
+
+Automated builds and verification are configured in `.github/workflows/ci-cd.yml`:
+
+- **Triggers:**
+  - **Push & Pull Requests (`master` / `main`):** Runs static analysis, unit/widget tests, and parallel multiplatform release builds, uploading downloadable build artifacts to the workflow run summary.
+  - **Manual Trigger (`workflow_dispatch`):** Allows triggering full multiplatform builds on demand from the GitHub Actions tab.
+  - **Version Tags (`v*`, e.g. `v1.0.1`):** Runs all verification and platform builds, then automatically creates a GitHub Release with generated release notes and attaches the compiled platform binaries.
+- **Pipeline Jobs:**
+  1. `analyze-and-test` (`ubuntu-latest`): Runs `flutter pub get`, `flutter analyze`, and `flutter test`.
+  2. `build-android` (`ubuntu-latest`): Configures JDK 17 and Gradle caching, compiles `flutter build apk --release`, and uploads `vinkit-android-release.apk`.
+  3. `build-web` (`ubuntu-latest`): Compiles `flutter build web --release` and packages `vinkit-web-release.zip`.
+  4. `build-windows` (`windows-latest`): Compiles `flutter build windows --release` and packages the x64 runner bundle into `vinkit-windows-x64-release.zip`.
+  5. `release` (`ubuntu-latest`, tag pushes only): Collects all three platform artifacts and publishes them to the corresponding GitHub Release.
