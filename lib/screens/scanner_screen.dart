@@ -17,10 +17,10 @@ import 'package:vinkit_app/widgets/ocr_camera_view.dart';
 import 'package:vinkit_app/widgets/scanner_controls.dart';
 import 'package:vinkit_app/widgets/scanner_overlay.dart';
 
-/// Active camera acquisition mode on [ScannerScreen].
+/// Active recognition target on [ScannerScreen].
 enum ScannerCaptureMode {
-  /// Continuous barcode scanning (Code 39, Code 128, Code 93, DataMatrix,
-  /// PDF417, QR).
+  /// Automotive VIN barcode recognition (Code 39, Code 128, Code 93,
+  /// DataMatrix, PDF417, QR).
   barcode,
 
   /// On-device plaintext VIN OCR powered by ONNX Runtime Mobile (PaddleOCR v5
@@ -28,7 +28,16 @@ enum ScannerCaptureMode {
   ocr,
 }
 
-/// Builder signature allowing tests to supply a lightweight OCR camera view.
+/// Active capture cadence on [ScannerScreen] for both Barcode and OCR modes.
+enum ScannerTriggerMode {
+  /// Continuously scans live camera frames hands-free.
+  live,
+
+  /// Captures a high-resolution snapshot on button tap (with EV/Gamma/HDR).
+  snap,
+}
+
+/// Builder signature allowing tests to supply a lightweight camera view.
 typedef OcrViewBuilder = Widget Function(
   BuildContext context, {
   required VinOcrService ocrService,
@@ -36,13 +45,16 @@ typedef OcrViewBuilder = Widget Function(
   required VinScanStrictness strictness,
   required Rect scanWindow,
   required bool isPaused,
+  required bool isBarcodeMode,
+  required bool isContinuous,
   required ValueChanged<String> onVinRecognized,
   required ValueChanged<String?> onManualEntryTap,
   required VoidCallback onSwitchStrictnessToNormal,
 });
 
-/// Primary live camera VIN scanning screen supporting both barcode scanning and
-/// on-device plaintext VIN OCR, with configurable Normal/Strict matching.
+/// Primary live camera VIN scanning screen supporting both Barcode and OCR
+/// modes, each with Live (continuous) and Snap (photo capture) triggers,
+/// Exposure/Gamma/HDR lighting controls, and Normal/Strict matching.
 ///
 /// Automatically falls back to [DesktopVinEntryView] on desktop targets
 /// (Windows and Linux) where live camera scanning is unavailable.
@@ -85,8 +97,18 @@ class ScannerScreen extends StatefulWidget {
   /// Optional platform capability override used by widget tests.
   final bool? cameraScannerSupportedOverride;
 
-  /// Optional OCR view builder override used by widget tests.
+  /// Optional camera view builder override used by widget tests.
   final OcrViewBuilder? ocrViewBuilder;
+
+  /// Barcode symbologies commonly used on automotive VIN stickers & labels.
+  static const List<BarcodeFormat> vinBarcodeFormats = <BarcodeFormat>[
+    BarcodeFormat.code39,
+    BarcodeFormat.code128,
+    BarcodeFormat.code93,
+    BarcodeFormat.dataMatrix,
+    BarcodeFormat.pdf417,
+    BarcodeFormat.qrCode,
+  ];
 
   /// Whether `mobile_scanner` provides a native implementation on the current
   /// platform (`android`, `ios`, `macos`, `web`).
@@ -114,10 +136,13 @@ class _ScannerScreenState extends State<ScannerScreen>
     with WidgetsBindingObserver {
   MobileScannerController? _scannerController;
   late final VinOcrService _ocrService;
+  final ValueNotifier<int> _switchCameraSignal = ValueNotifier<int>(0);
 
   ScannerCaptureMode _captureMode = ScannerCaptureMode.barcode;
+  ScannerTriggerMode _barcodeTriggerMode = ScannerTriggerMode.live;
+  ScannerTriggerMode _ocrTriggerMode = ScannerTriggerMode.snap;
   late VinScanStrictness _strictness;
-  bool _isSwitchingMode = false;
+  bool _isSwitchingCameraBackend = false;
 
   double _zoomScale = 0.0;
   bool _isScanLocked = false;
@@ -133,6 +158,36 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   bool get _supportsOcr => _ocrService.isSupported;
 
+  /// Whether the platform supports Snap capture mode and unified EV/Gamma/HDR
+  /// camera controls (Android and iOS).
+  bool get _supportsSnapAndLighting =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS ||
+          widget.ocrViewBuilder != null);
+
+  /// Active trigger mode (`Live` or `Snap`) for the currently selected mode.
+  ScannerTriggerMode get _activeTriggerMode =>
+      _captureMode == ScannerCaptureMode.barcode
+          ? _barcodeTriggerMode
+          : _ocrTriggerMode;
+
+  /// On Android, use the unified [OcrCameraView] across all 4 combinations
+  /// (`Barcode Live/Snap`, `OCR Live/Snap`) so Exposure/Gamma/HDR work
+  /// everywhere and mode switching is instantaneous with zero camera reopen.
+  /// On iOS, use [OcrCameraView] for OCR (Live/Snap) and Barcode Snap, keeping
+  /// [MobileScanner] for Barcode Live.
+  bool get _usesUnifiedCameraView {
+    if (!_supportsSnapAndLighting) {
+      return false;
+    }
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      return true;
+    }
+    return _captureMode == ScannerCaptureMode.ocr ||
+        _activeTriggerMode == ScannerTriggerMode.snap;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -141,14 +196,8 @@ class _ScannerScreenState extends State<ScannerScreen>
     _ocrService = widget.ocrService ?? createPlatformVinOcrService();
     if (_supportsCameraScanner) {
       _scannerController = MobileScannerController(
-        formats: const <BarcodeFormat>[
-          BarcodeFormat.code39,
-          BarcodeFormat.code128,
-          BarcodeFormat.code93,
-          BarcodeFormat.dataMatrix,
-          BarcodeFormat.pdf417,
-          BarcodeFormat.qrCode,
-        ],
+        autoStart: !_usesUnifiedCameraView,
+        formats: ScannerScreen.vinBarcodeFormats,
         detectionSpeed: DetectionSpeed.normal,
       );
     }
@@ -156,7 +205,7 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (_scannerController == null || _captureMode != ScannerCaptureMode.barcode) {
+    if (_scannerController == null || _usesUnifiedCameraView) {
       return;
     }
     if (state == AppLifecycleState.inactive ||
@@ -212,7 +261,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     if (controller == null ||
         !mounted ||
         _isScanLocked ||
-        _captureMode != ScannerCaptureMode.barcode) {
+        _usesUnifiedCameraView) {
       return;
     }
     final scannerState = controller.value;
@@ -223,7 +272,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       await controller.start();
       if (mounted &&
           !_isScanLocked &&
-          _captureMode == ScannerCaptureMode.barcode &&
+          !_usesUnifiedCameraView &&
           !kIsWeb &&
           _zoomScale > 0.0) {
         await controller.setZoomScale(_zoomScale);
@@ -237,43 +286,89 @@ class _ScannerScreenState extends State<ScannerScreen>
     }
   }
 
+  Future<BarcodeCapture?> _analyzeBarcodeImage(String imagePath) async {
+    final controller = _scannerController;
+    if (controller == null) {
+      return null;
+    }
+    try {
+      return await controller.analyzeImage(
+        imagePath,
+        formats: ScannerScreen.vinBarcodeFormats,
+      );
+    } on MobileScannerException catch (error) {
+      debugPrint('Failed to analyze barcode image: ${error.errorCode}');
+      return null;
+    } on MissingPluginException {
+      return null;
+    } on UnsupportedError {
+      return null;
+    }
+  }
+
+  Future<void> _applyModeTransition(VoidCallback mutateMode) async {
+    if (_isSwitchingCameraBackend || _isScanLocked) {
+      return;
+    }
+    final wasUnified = _usesUnifiedCameraView;
+    _clearStatusMessage();
+
+    // Peek at whether the camera backend actually changes (e.g., iOS switching
+    // between MobileScanner and CameraController; on Android it stays unified).
+    setState(() {
+      _isSwitchingCameraBackend = true;
+    });
+
+    var willBeUnified = wasUnified;
+    if (!wasUnified) {
+      await _stopScanning();
+      if (!mounted) {
+        return;
+      }
+    }
+
+    setState(() {
+      mutateMode();
+      willBeUnified = _usesUnifiedCameraView;
+    });
+
+    if (wasUnified && !willBeUnified) {
+      // Allow CameraController to finish disposing before starting MobileScanner.
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      if (!mounted) {
+        return;
+      }
+      await _resumeCamera();
+    }
+
+    if (mounted) {
+      setState(() => _isSwitchingCameraBackend = false);
+    }
+  }
+
   Future<void> _switchCaptureMode(ScannerCaptureMode targetMode) async {
-    if (_captureMode == targetMode || _isSwitchingMode || _isScanLocked) {
+    if (_captureMode == targetMode) {
       return;
     }
     if (targetMode == ScannerCaptureMode.ocr && !_supportsOcr) {
       return;
     }
-
-    _clearStatusMessage();
-    setState(() => _isSwitchingMode = true);
-
-    if (targetMode == ScannerCaptureMode.ocr) {
-      // Release the barcode scanner's camera hardware before opening CameraController.
-      await _stopScanning();
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _captureMode = ScannerCaptureMode.ocr;
-        _isSwitchingMode = false;
-      });
-      return;
-    }
-
-    // Switching back from OCR to Barcode: unmount OcrCameraView first so its
-    // CameraController disposes, then start MobileScannerController.
-    setState(() {
-      _captureMode = ScannerCaptureMode.barcode;
+    await _applyModeTransition(() {
+      _captureMode = targetMode;
     });
-    await Future<void>.delayed(const Duration(milliseconds: 120));
-    if (!mounted) {
+  }
+
+  Future<void> _switchTriggerMode(ScannerTriggerMode targetTrigger) async {
+    if (_activeTriggerMode == targetTrigger || !_supportsSnapAndLighting) {
       return;
     }
-    await _resumeCamera();
-    if (mounted) {
-      setState(() => _isSwitchingMode = false);
-    }
+    await _applyModeTransition(() {
+      if (_captureMode == ScannerCaptureMode.barcode) {
+        _barcodeTriggerMode = targetTrigger;
+      } else {
+        _ocrTriggerMode = targetTrigger;
+      }
+    });
   }
 
   void _setStrictness(VinScanStrictness strictness) {
@@ -330,6 +425,10 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   Future<void> _switchCamera() async {
+    if (_usesUnifiedCameraView) {
+      _switchCameraSignal.value++;
+      return;
+    }
     final controller = _scannerController;
     if (controller == null) {
       return;
@@ -366,7 +465,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     // screen transition, while kicking off the VIN API lookup in parallel.
     final feedbackFuture = widget.feedbackService.playValidScanFeedback();
     unawaited(widget.vinController.lookupVin(vin));
-    if (_captureMode == ScannerCaptureMode.barcode) {
+    if (!_usesUnifiedCameraView) {
       unawaited(_stopScanning());
     }
     try {
@@ -382,9 +481,7 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   void _onBarcodeDetected(BarcodeCapture capture) {
-    if (_isScanLocked ||
-        !mounted ||
-        _captureMode != ScannerCaptureMode.barcode) {
+    if (_isScanLocked || !mounted || _usesUnifiedCameraView) {
       return;
     }
 
@@ -485,7 +582,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       return;
     }
     setState(() => _isScanLocked = true);
-    if (_captureMode == ScannerCaptureMode.barcode) {
+    if (!_usesUnifiedCameraView) {
       unawaited(_stopScanning());
     }
 
@@ -509,7 +606,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     }
 
     setState(() => _isScanLocked = false);
-    if (_captureMode == ScannerCaptureMode.barcode) {
+    if (!_usesUnifiedCameraView) {
       await _resumeCamera();
     }
   }
@@ -550,7 +647,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     }
 
     setState(() => _isScanLocked = false);
-    if (_captureMode == ScannerCaptureMode.barcode) {
+    if (!_usesUnifiedCameraView) {
       await _resumeCamera();
     }
   }
@@ -574,6 +671,7 @@ class _ScannerScreenState extends State<ScannerScreen>
   @override
   void dispose() {
     _statusTimer?.cancel();
+    _switchCameraSignal.dispose();
     WidgetsBinding.instance.removeObserver(this);
     final controller = _scannerController;
     if (controller != null) {
@@ -601,14 +699,16 @@ class _ScannerScreenState extends State<ScannerScreen>
     final height = viewportSize.height;
     final scanWidth = math.min(width * 0.88, 420.0);
     const scanHeight = 104.0;
-    final scanCenterY = math.max(210.0, height * 0.40);
+    final scanCenterY = math.max(220.0, height * 0.41);
     final scanWindow = Rect.fromCenter(
       center: Offset(width / 2, scanCenterY),
       width: scanWidth,
       height: scanHeight,
     );
 
-    final isOcrMode = _captureMode == ScannerCaptureMode.ocr;
+    final isBarcodeMode = _captureMode == ScannerCaptureMode.barcode;
+    final isContinuous = _activeTriggerMode == ScannerTriggerMode.live;
+    final useUnified = _usesUnifiedCameraView;
     final strictnessCaption = _strictness == VinScanStrictness.normal
         ? 'Align VIN barcode (Normal • flexible)'
         : 'Align VIN barcode (Strict • exact 17-char)';
@@ -618,7 +718,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       body: Stack(
         fit: StackFit.expand,
         children: <Widget>[
-          if (isOcrMode)
+          if (useUnified)
             widget.ocrViewBuilder != null
                 ? widget.ocrViewBuilder!(
                     context,
@@ -627,6 +727,8 @@ class _ScannerScreenState extends State<ScannerScreen>
                     strictness: _strictness,
                     scanWindow: scanWindow,
                     isPaused: _isScanLocked,
+                    isBarcodeMode: isBarcodeMode,
+                    isContinuous: isContinuous,
                     onVinRecognized: _triggerValidVinLock,
                     onManualEntryTap: (initial) =>
                         unawaited(_openManualEntrySheet(initialVin: initial)),
@@ -639,6 +741,10 @@ class _ScannerScreenState extends State<ScannerScreen>
                     strictness: _strictness,
                     scanWindow: scanWindow,
                     isPaused: _isScanLocked,
+                    isBarcodeMode: isBarcodeMode,
+                    isContinuous: isContinuous,
+                    onAnalyzeBarcodeImage: _analyzeBarcodeImage,
+                    switchCameraSignal: _switchCameraSignal,
                     onVinRecognized: _triggerValidVinLock,
                     onManualEntryTap: (initial) =>
                         unawaited(_openManualEntrySheet(initialVin: initial)),
@@ -714,9 +820,9 @@ class _ScannerScreenState extends State<ScannerScreen>
                                     height: 22,
                                     fit: BoxFit.cover,
                                     errorBuilder: (_, _, _) => Icon(
-                                      isOcrMode
-                                          ? Icons.document_scanner_rounded
-                                          : Icons.qr_code_scanner_rounded,
+                                      isBarcodeMode
+                                          ? Icons.qr_code_scanner_rounded
+                                          : Icons.document_scanner_rounded,
                                       size: 18,
                                       color: Colors.white,
                                     ),
@@ -739,7 +845,21 @@ class _ScannerScreenState extends State<ScannerScreen>
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: <Widget>[
-                            if (!isOcrMode)
+                            if (useUnified)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: IconButton.filledTonal(
+                                  onPressed: () => unawaited(_switchCamera()),
+                                  tooltip: 'Switch camera',
+                                  style: IconButton.styleFrom(
+                                    backgroundColor:
+                                        Colors.black.withValues(alpha: 0.66),
+                                    foregroundColor: Colors.white,
+                                  ),
+                                  icon: const Icon(Icons.cameraswitch_rounded),
+                                ),
+                              )
+                            else
                               ValueListenableBuilder<MobileScannerState>(
                                 valueListenable: controller,
                                 builder: (context, scannerState, _) {
@@ -784,13 +904,14 @@ class _ScannerScreenState extends State<ScannerScreen>
                     const SizedBox(height: 10),
                     Wrap(
                       alignment: WrapAlignment.center,
-                      spacing: 8,
-                      runSpacing: 8,
+                      spacing: 6,
+                      runSpacing: 6,
                       children: <Widget>[
                         if (_supportsOcr)
                           _HudSegmentedPill<ScannerCaptureMode>(
                             selected: _captureMode,
-                            enabled: !_isSwitchingMode && !_isScanLocked,
+                            enabled:
+                                !_isSwitchingCameraBackend && !_isScanLocked,
                             options: const <
                                 _HudSegmentOption<ScannerCaptureMode>>[
                               _HudSegmentOption<ScannerCaptureMode>(
@@ -806,6 +927,27 @@ class _ScannerScreenState extends State<ScannerScreen>
                             ],
                             onChanged: (mode) =>
                                 unawaited(_switchCaptureMode(mode)),
+                          ),
+                        if (_supportsSnapAndLighting)
+                          _HudSegmentedPill<ScannerTriggerMode>(
+                            selected: _activeTriggerMode,
+                            enabled:
+                                !_isSwitchingCameraBackend && !_isScanLocked,
+                            options: const <
+                                _HudSegmentOption<ScannerTriggerMode>>[
+                              _HudSegmentOption<ScannerTriggerMode>(
+                                value: ScannerTriggerMode.live,
+                                label: 'Live',
+                                icon: Icons.sensors_rounded,
+                              ),
+                              _HudSegmentOption<ScannerTriggerMode>(
+                                value: ScannerTriggerMode.snap,
+                                label: 'Snap',
+                                icon: Icons.camera_alt_rounded,
+                              ),
+                            ],
+                            onChanged: (trigger) =>
+                                unawaited(_switchTriggerMode(trigger)),
                           ),
                         _HudSegmentedPill<VinScanStrictness>(
                           selected: _strictness,
@@ -831,7 +973,7 @@ class _ScannerScreenState extends State<ScannerScreen>
               ),
             ),
           ),
-          if (!isOcrMode)
+          if (!useUnified)
             ValueListenableBuilder<MobileScannerState>(
               valueListenable: controller,
               builder: (context, scannerState, _) {
@@ -910,7 +1052,7 @@ class _HudSegmentedPill<T> extends StatelessWidget {
                 borderRadius: BorderRadius.circular(18),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 11,
+                    horizontal: 10,
                     vertical: 6,
                   ),
                   child: Row(
@@ -918,19 +1060,19 @@ class _HudSegmentedPill<T> extends StatelessWidget {
                     children: <Widget>[
                       Icon(
                         option.icon,
-                        size: 15,
+                        size: 14,
                         color: isSelected
                             ? colorScheme.onPrimary
                             : Colors.white.withValues(alpha: 0.85),
                       ),
-                      const SizedBox(width: 5),
+                      const SizedBox(width: 4),
                       Text(
                         option.label,
                         style: TextStyle(
                           color: isSelected
                               ? colorScheme.onPrimary
                               : Colors.white.withValues(alpha: 0.9),
-                          fontSize: 12.5,
+                          fontSize: 12,
                           fontWeight: FontWeight.w700,
                         ),
                       ),

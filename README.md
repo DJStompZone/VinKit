@@ -1,6 +1,6 @@
 # VinKit
 
-A production-ready multiplatform Flutter application (Android, iOS, Web, and Windows/desktop) for scanning automotive VIN barcodes and reading plaintext printed VINs via on-device OCR, validating 17-character VINs, and immediately displaying vehicle specs, motor oil, filters, wipers, and maintenance fluid codes.
+A multiplatform (Android, iOS, Web, and Windows Desktop) Flutter application for scanning automotive VIN barcodes and reading plaintext printed VINs via on-device OCR, validating 17-character VINs, and immediately displaying vehicle specs, as well as product codes for motor oil, filters, wipers, and maintenance fluids.
 
 ## Features
 

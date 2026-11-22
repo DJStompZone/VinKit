@@ -351,5 +351,16 @@ void main() {
       expect(glareMatrix[4], lessThan(0.0));
       expect(glareMid, lessThan(127.5));
     });
+
+    test('applies contrast boost when HDR preview is enabled', () {
+      final hdrMatrix = OcrImagePreprocessor.buildPreviewColorMatrix(
+        gamma: 1.0,
+        hdrEnabled: true,
+      );
+      expect(hdrMatrix[0], greaterThan(1.0));
+      expect(hdrMatrix[6], greaterThan(1.0));
+      expect(hdrMatrix[12], greaterThan(1.0));
+      expect(hdrMatrix[18], 1.0);
+    });
   });
 }

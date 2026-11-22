@@ -3,8 +3,8 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:vinkit_app/theme/app_theme.dart';
 
 /// Floating bottom camera HUD providing zoom controls, torch toggle,
-/// optional collapsible Exposure (EV) & Gamma lighting controls,
-/// optional OCR capture trigger, and manual VIN entry button.
+/// optional collapsible Exposure (EV), Gamma & HDR lighting controls,
+/// optional Snap capture trigger, and manual VIN entry button.
 class ScannerControls extends StatelessWidget {
   /// Creates a [ScannerControls] bar.
   const ScannerControls({
@@ -30,6 +30,8 @@ class ScannerControls extends StatelessWidget {
     this.onExposureChanged,
     this.gamma = 1.0,
     this.onGammaChanged,
+    this.hdrEnabled = false,
+    this.onHdrChanged,
     this.onResetLighting,
     this.onApplyLightingPreset,
   });
@@ -55,7 +57,7 @@ class ScannerControls extends StatelessWidget {
   /// Invoked when the user taps the manual VIN entry trigger.
   final VoidCallback onManualEntryTap;
 
-  /// Optional primary capture action label (used in OCR mode).
+  /// Optional primary capture action label (used in Snap mode).
   final String? primaryActionLabel;
 
   /// Optional icon for the primary capture action.
@@ -67,10 +69,10 @@ class ScannerControls extends StatelessWidget {
   /// Whether the primary action button is currently busy running inference.
   final bool isPrimaryBusy;
 
-  /// Whether to expose the Exposure/Gamma lighting toggle button and panel.
+  /// Whether to expose the Exposure/Gamma/HDR lighting toggle button and panel.
   final bool showLightingControls;
 
-  /// Whether the collapsible Exposure/Gamma lighting panel is expanded.
+  /// Whether the collapsible Exposure/Gamma/HDR lighting panel is expanded.
   final bool isLightingExpanded;
 
   /// Invoked when the user toggles the lighting panel.
@@ -97,14 +99,20 @@ class ScannerControls extends StatelessWidget {
   /// Invoked when the user drags the gamma slider.
   final ValueChanged<double>? onGammaChanged;
 
-  /// Invoked when the user resets Exposure and Gamma back to neutral.
+  /// Whether HDR local-contrast & highlight/shadow recovery is enabled.
+  final bool hdrEnabled;
+
+  /// Invoked when the user toggles HDR enhancement.
+  final ValueChanged<bool>? onHdrChanged;
+
+  /// Invoked when the user resets Exposure, Gamma, and HDR back to neutral.
   final VoidCallback? onResetLighting;
 
-  /// Invoked when the user taps a quick lighting preset (`ev`, `gamma`).
-  final void Function(double ev, double gamma)? onApplyLightingPreset;
+  /// Invoked when the user taps a quick lighting preset (`ev`, `gamma`, `hdr`).
+  final void Function(double ev, double gamma, bool hdr)? onApplyLightingPreset;
 
   bool get _hasCustomLighting =>
-      exposureOffset.abs() >= 0.05 || (gamma - 1.0).abs() >= 0.03;
+      hdrEnabled || exposureOffset.abs() >= 0.05 || (gamma - 1.0).abs() >= 0.03;
 
   String _formatEv(double ev) {
     if (ev.abs() < 0.05) {
@@ -134,9 +142,11 @@ class ScannerControls extends StatelessWidget {
 
     final isAutoPreset = !_hasCustomLighting;
     final isGlarePreset =
+        hdrEnabled &&
         (clampedGamma - 0.75).abs() <= 0.08 &&
         (!hasValidExposureRange || clampedEv <= -0.6);
     final isDarkPreset =
+        hdrEnabled &&
         (clampedGamma - 1.45).abs() <= 0.12 &&
         (!hasValidExposureRange || clampedEv >= 0.6);
 
@@ -179,6 +189,8 @@ class ScannerControls extends StatelessWidget {
                       isAutoPreset: isAutoPreset,
                       isGlarePreset: isGlarePreset,
                       isDarkPreset: isDarkPreset,
+                      hdrEnabled: hdrEnabled,
+                      onHdrChanged: onHdrChanged,
                       hasValidExposureRange: hasValidExposureRange,
                       exposureOffset: clampedEv,
                       minExposureOffset: minExposureOffset,
@@ -269,8 +281,8 @@ class ScannerControls extends StatelessWidget {
                             IconButton.filledTonal(
                               onPressed: onToggleLightingPanel,
                               tooltip: isLightingExpanded
-                                  ? 'Hide exposure & gamma controls'
-                                  : 'Adjust exposure & gamma',
+                                  ? 'Hide exposure, gamma & HDR controls'
+                                  : 'Adjust exposure, gamma & HDR',
                               style: IconButton.styleFrom(
                                 minimumSize: const Size(48, 48),
                                 backgroundColor: isLightingExpanded
@@ -318,7 +330,7 @@ class ScannerControls extends StatelessWidget {
                                   )
                                 : Icon(
                                     primaryActionIcon ??
-                                        Icons.document_scanner_rounded,
+                                        Icons.camera_alt_rounded,
                                   ),
                             label: Text(
                               primaryActionLabel!,
@@ -367,6 +379,8 @@ class _LightingAdjustmentPanel extends StatelessWidget {
     required this.isAutoPreset,
     required this.isGlarePreset,
     required this.isDarkPreset,
+    required this.hdrEnabled,
+    required this.onHdrChanged,
     required this.hasValidExposureRange,
     required this.exposureOffset,
     required this.minExposureOffset,
@@ -385,6 +399,8 @@ class _LightingAdjustmentPanel extends StatelessWidget {
   final bool isAutoPreset;
   final bool isGlarePreset;
   final bool isDarkPreset;
+  final bool hdrEnabled;
+  final ValueChanged<bool>? onHdrChanged;
   final bool hasValidExposureRange;
   final double exposureOffset;
   final double minExposureOffset;
@@ -394,7 +410,7 @@ class _LightingAdjustmentPanel extends StatelessWidget {
   final ValueChanged<double>? onExposureChanged;
   final ValueChanged<double>? onGammaChanged;
   final VoidCallback? onResetLighting;
-  final void Function(double ev, double gamma)? onApplyLightingPreset;
+  final void Function(double ev, double gamma, bool hdr)? onApplyLightingPreset;
 
   @override
   Widget build(BuildContext context) {
@@ -412,19 +428,29 @@ class _LightingAdjustmentPanel extends StatelessWidget {
                     label: 'Auto',
                     selected: isAutoPreset,
                     enabled: true,
-                    onTap: () => onApplyLightingPreset?.call(0.0, 1.0),
+                    onTap: () => onApplyLightingPreset?.call(0.0, 1.0, false),
                   ),
                   _HudChip(
                     label: 'Glare',
                     selected: isGlarePreset,
                     enabled: true,
-                    onTap: () => onApplyLightingPreset?.call(-1.2, 0.75),
+                    onTap: () => onApplyLightingPreset?.call(-1.2, 0.75, true),
                   ),
                   _HudChip(
                     label: 'Dark',
                     selected: isDarkPreset,
                     enabled: true,
-                    onTap: () => onApplyLightingPreset?.call(1.2, 1.45),
+                    onTap: () => onApplyLightingPreset?.call(1.2, 1.45, true),
+                  ),
+                  _HudChip(
+                    label: 'HDR',
+                    icon: hdrEnabled
+                        ? Icons.hdr_on_rounded
+                        : Icons.hdr_off_rounded,
+                    selected: hdrEnabled,
+                    enabled: onHdrChanged != null,
+                    accentColor: AppTheme.brandAmber,
+                    onTap: () => onHdrChanged?.call(!hdrEnabled),
                   ),
                 ],
               ),
@@ -541,36 +567,56 @@ class _HudChip extends StatelessWidget {
     required this.selected,
     required this.enabled,
     required this.onTap,
+    this.icon,
+    this.accentColor,
   });
 
   final String label;
   final bool selected;
   final bool enabled;
   final VoidCallback onTap;
+  final IconData? icon;
+  final Color? accentColor;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final activeBg = accentColor ?? colorScheme.primary;
+    final activeFg =
+        accentColor != null ? const Color(0xFF1A0D00) : colorScheme.onPrimary;
 
     return Material(
-      color: selected
-          ? colorScheme.primary
-          : Colors.white.withValues(alpha: 0.14),
+      color: selected ? activeBg : Colors.white.withValues(alpha: 0.14),
       borderRadius: BorderRadius.circular(20),
       child: InkWell(
         onTap: enabled ? onTap : null,
         borderRadius: BorderRadius.circular(20),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
-          child: Text(
-            label,
-            style: TextStyle(
-              color: enabled
-                  ? (selected ? colorScheme.onPrimary : Colors.white)
-                  : Colors.white38,
-              fontSize: 12.5,
-              fontWeight: FontWeight.w700,
-            ),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              if (icon != null) ...<Widget>[
+                Icon(
+                  icon,
+                  size: 14,
+                  color: enabled
+                      ? (selected ? activeFg : Colors.white)
+                      : Colors.white38,
+                ),
+                const SizedBox(width: 4),
+              ],
+              Text(
+                label,
+                style: TextStyle(
+                  color: enabled
+                      ? (selected ? activeFg : Colors.white)
+                      : Colors.white38,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
           ),
         ),
       ),

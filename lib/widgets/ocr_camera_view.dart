@@ -3,8 +3,10 @@ import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
-import 'package:mobile_scanner/mobile_scanner.dart' show TorchState;
+import 'package:mobile_scanner/mobile_scanner.dart'
+    show BarcodeCapture, TorchState;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:vinkit_app/services/ocr_image_preprocessor.dart';
 import 'package:vinkit_app/services/vin_ocr_service.dart';
@@ -12,8 +14,9 @@ import 'package:vinkit_app/services/vin_validator.dart';
 import 'package:vinkit_app/widgets/scanner_controls.dart';
 import 'package:vinkit_app/widgets/scanner_overlay.dart';
 
-/// Live camera capture view for reading plaintext printed VINs using on-device
-/// OCR (ONNX Runtime Mobile with PaddleOCR v5 on Android, Apple Vision on iOS).
+/// Unified live/snap mobile camera view supporting both VIN barcode decoding
+/// and on-device plaintext VIN OCR with real-time Exposure (EV), Gamma, and
+/// HDR local-contrast controls.
 class OcrCameraView extends StatefulWidget {
   /// Creates an [OcrCameraView].
   const OcrCameraView({
@@ -25,6 +28,10 @@ class OcrCameraView extends StatefulWidget {
     required this.isPaused,
     required this.onVinRecognized,
     required this.onManualEntryTap,
+    this.isBarcodeMode = false,
+    this.isContinuous = false,
+    this.onAnalyzeBarcodeImage,
+    this.switchCameraSignal,
     this.onSwitchStrictnessToNormal,
     this.preprocessor = const OcrImagePreprocessor(),
   });
@@ -32,31 +39,43 @@ class OcrCameraView extends StatefulWidget {
   /// On-device OCR engine (PaddleOCR v5 ONNX Runtime / Apple Vision).
   final VinOcrService ocrService;
 
-  /// VIN validator and OCR text extractor.
+  /// VIN validator and OCR/barcode text extractor.
   final VinValidator validator;
 
   /// Active VIN matching strictness mode.
   final VinScanStrictness strictness;
 
-  /// Alignment frame rectangle matching the barcode viewfinder.
+  /// Alignment frame rectangle matching the scanner viewfinder.
   final Rect scanWindow;
 
   /// Whether camera interaction is temporarily paused (e.g. result screen open).
   final bool isPaused;
 
-  /// Called immediately when OCR recognizes a valid 17-character VIN.
+  /// Whether the active recognition target is barcode (`true`) or OCR (`false`).
+  final bool isBarcodeMode;
+
+  /// Whether to continuously scan frames (`true`) or capture on button tap (`false`).
+  final bool isContinuous;
+
+  /// Analyzes a prepared image file for automotive VIN barcodes.
+  final Future<BarcodeCapture?> Function(String imagePath)? onAnalyzeBarcodeImage;
+
+  /// Optional monotonic counter incremented when the parent requests switching cameras.
+  final ValueListenable<int>? switchCameraSignal;
+
+  /// Called immediately when barcode or OCR recognizes a valid 17-character VIN.
   final ValueChanged<String> onVinRecognized;
 
   /// Called when the user opens manual VIN entry, optionally prefilled with a
   /// partial OCR snippet.
   final ValueChanged<String?> onManualEntryTap;
 
-  /// Optional shortcut to switch strictness from Strict to Normal when OCR
-  /// detects a candidate that only matches under Normal mode.
+  /// Optional shortcut to switch strictness from Strict to Normal when a
+  /// candidate only matches under Normal mode.
   final VoidCallback? onSwitchStrictnessToNormal;
 
   /// Native image preprocessor cropping to the viewfinder ROI and applying
-  /// user-selected gamma correction before OCR inference.
+  /// user-selected HDR & gamma enhancement before recognition.
   final OcrImagePreprocessor preprocessor;
 
   @override
@@ -65,12 +84,17 @@ class OcrCameraView extends StatefulWidget {
 
 class _OcrCameraViewState extends State<OcrCameraView>
     with WidgetsBindingObserver {
+  static const Duration _liveBarcodeCooldown = Duration(milliseconds: 180);
+  static const Duration _liveOcrCooldown = Duration(milliseconds: 750);
+  static const Duration _fallbackCaptureInterval = Duration(milliseconds: 1100);
+
   CameraController? _cameraController;
   List<CameraDescription> _cameras = const <CameraDescription>[];
   int _selectedCameraIndex = 0;
   int _cameraGeneration = 0;
 
   bool _isInitializingCamera = true;
+  bool _isSwitchingCamera = false;
   String? _cameraError;
   bool _isPermissionDenied = false;
 
@@ -78,7 +102,12 @@ class _OcrCameraViewState extends State<OcrCameraView>
   bool _isPreparingModels = false;
   String? _modelError;
 
-  bool _isProcessingOcr = false;
+  bool _isProcessingFrame = false;
+  bool _isStreamActive = false;
+  DateTime? _lastFrameFinishedAt;
+  Timer? _fallbackContinuousTimer;
+  Timer? _transientStatusTimer;
+
   double _zoomScale = 0.0;
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
@@ -90,6 +119,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
   double _exposureStepSize = 0.0;
   double _exposureOffset = 0.0;
   double _gamma = 1.0;
+  bool _hdrEnabled = false;
   bool _isLightingPanelExpanded = false;
 
   Size? _lastViewportSize;
@@ -103,26 +133,72 @@ class _OcrCameraViewState extends State<OcrCameraView>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.switchCameraSignal?.addListener(_onSwitchCameraRequested);
     unawaited(_initializeCamera());
-    unawaited(_ensureModelsReady());
+    if (!widget.isBarcodeMode) {
+      unawaited(_ensureModelsReady());
+    }
   }
 
   @override
   void didUpdateWidget(covariant OcrCameraView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.switchCameraSignal != widget.switchCameraSignal) {
+      oldWidget.switchCameraSignal?.removeListener(_onSwitchCameraRequested);
+      widget.switchCameraSignal?.addListener(_onSwitchCameraRequested);
+    }
+
+    if (oldWidget.isBarcodeMode != widget.isBarcodeMode ||
+        oldWidget.isContinuous != widget.isContinuous ||
+        oldWidget.strictness != widget.strictness) {
+      _clearStatusMessage();
+      if (!widget.isBarcodeMode && !_isModelReady) {
+        unawaited(_ensureModelsReady());
+      }
+    }
+
     final controller = _cameraController;
     if (controller == null || !controller.value.isInitialized) {
       return;
     }
+
     if (oldWidget.isPaused != widget.isPaused) {
       if (widget.isPaused) {
-        if (!_isProcessingOcr) {
+        unawaited(_stopContinuousCapture(controller));
+        if (!_isProcessingFrame) {
           unawaited(_pausePreviewSafely(controller));
         }
       } else {
-        unawaited(_resumePreviewSafely(controller));
+        unawaited(_resumeAfterPause(controller));
       }
+      return;
     }
+
+    if (oldWidget.isContinuous != widget.isContinuous ||
+        oldWidget.isBarcodeMode != widget.isBarcodeMode) {
+      unawaited(_syncContinuousCapture(controller));
+    }
+  }
+
+  Future<void> _resumeAfterPause(CameraController controller) async {
+    await _resumePreviewSafely(controller);
+    if (!mounted || _cameraController != controller || widget.isPaused) {
+      return;
+    }
+    await _syncContinuousCapture(controller);
+  }
+
+  void _onSwitchCameraRequested() {
+    if (_cameras.length < 2 || _isSwitchingCamera || _isInitializingCamera) {
+      return;
+    }
+    _isSwitchingCamera = true;
+    _selectedCameraIndex = (_selectedCameraIndex + 1) % _cameras.length;
+    unawaited(
+      _initializeCamera().whenComplete(() {
+        _isSwitchingCamera = false;
+      }),
+    );
   }
 
   Future<void> _pausePreviewSafely(CameraController controller) async {
@@ -162,7 +238,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
   }
 
   Future<void> _ensureModelsReady() async {
-    if (!widget.ocrService.isSupported || _isPreparingModels) {
+    if (!widget.ocrService.isSupported || _isPreparingModels || _isModelReady) {
       return;
     }
     final alreadyReady = await widget.ocrService.isModelReady();
@@ -174,6 +250,10 @@ class _OcrCameraViewState extends State<OcrCameraView>
         _isModelReady = true;
         _modelError = null;
       });
+      final controller = _cameraController;
+      if (controller != null && controller.value.isInitialized) {
+        unawaited(_syncContinuousCapture(controller));
+      }
       return;
     }
 
@@ -199,6 +279,10 @@ class _OcrCameraViewState extends State<OcrCameraView>
           _statusMessage = null;
         }
       });
+      final controller = _cameraController;
+      if (controller != null && controller.value.isInitialized) {
+        unawaited(_syncContinuousCapture(controller));
+      }
     } on VinOcrException catch (error) {
       if (!mounted) {
         return;
@@ -255,12 +339,12 @@ class _OcrCameraViewState extends State<OcrCameraView>
         return;
       }
 
+      final hadCameras = _cameras.isNotEmpty;
       _cameras = cameras;
       if (_selectedCameraIndex >= _cameras.length) {
         _selectedCameraIndex = 0;
       }
-      // Default to the back camera on first initialization.
-      if (_selectedCameraIndex == 0) {
+      if (!hadCameras && _selectedCameraIndex == 0) {
         final backIndex = _cameras.indexWhere(
           (cam) => cam.lensDirection == CameraLensDirection.back,
         );
@@ -269,11 +353,14 @@ class _OcrCameraViewState extends State<OcrCameraView>
         }
       }
 
+      final formatGroup = defaultTargetPlatform == TargetPlatform.iOS
+          ? ImageFormatGroup.bgra8888
+          : ImageFormatGroup.yuv420;
       final controller = CameraController(
         _cameras[_selectedCameraIndex],
         ResolutionPreset.high,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.jpeg,
+        imageFormatGroup: formatGroup,
       );
 
       await controller.initialize();
@@ -355,6 +442,10 @@ class _OcrCameraViewState extends State<OcrCameraView>
         _exposureOffset = restoredEv;
         _isInitializingCamera = false;
       });
+
+      if (!widget.isPaused) {
+        await _syncContinuousCapture(controller);
+      }
     } on CameraException catch (error) {
       if (!mounted || generation != _cameraGeneration) {
         return;
@@ -365,8 +456,8 @@ class _OcrCameraViewState extends State<OcrCameraView>
         _isInitializingCamera = false;
         _isPermissionDenied = denied;
         _cameraError = denied
-            ? 'Camera permission is required to read printed VINs with OCR.'
-            : (error.description ?? 'Unable to start OCR camera preview.');
+            ? 'Camera permission is required to scan VIN barcodes and printed text.'
+            : (error.description ?? 'Unable to start camera preview.');
       });
     } catch (_) {
       if (!mounted || generation != _cameraGeneration) {
@@ -374,7 +465,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
       }
       setState(() {
         _isInitializingCamera = false;
-        _cameraError = 'Unable to start OCR camera preview.';
+        _cameraError = 'Unable to start camera preview.';
       });
     }
   }
@@ -383,10 +474,22 @@ class _OcrCameraViewState extends State<OcrCameraView>
     if (bumpGeneration) {
       _cameraGeneration++;
     }
+    _fallbackContinuousTimer?.cancel();
+    _fallbackContinuousTimer = null;
+
     final controller = _cameraController;
     _cameraController = null;
+    _isStreamActive = false;
     if (controller == null) {
       return;
+    }
+    try {
+      if (controller.value.isInitialized &&
+          controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+    } catch (_) {
+      // Ignore stream teardown errors.
     }
     try {
       if (_isTorchOn && controller.value.isInitialized) {
@@ -402,6 +505,179 @@ class _OcrCameraViewState extends State<OcrCameraView>
     }
   }
 
+  Future<void> _syncContinuousCapture(CameraController controller) async {
+    if (!mounted || _cameraController != controller) {
+      return;
+    }
+    final shouldStream = widget.isContinuous &&
+        !widget.isPaused &&
+        controller.value.isInitialized &&
+        (widget.isBarcodeMode || _isModelReady);
+
+    if (!shouldStream) {
+      await _stopContinuousCapture(controller);
+      return;
+    }
+
+    if (widget.preprocessor.supportsStreamFramePrep) {
+      _fallbackContinuousTimer?.cancel();
+      _fallbackContinuousTimer = null;
+      if (_isStreamActive || controller.value.isStreamingImages) {
+        return;
+      }
+      try {
+        _isStreamActive = true;
+        await controller.startImageStream(_onLiveCameraFrame);
+      } catch (_) {
+        _isStreamActive = false;
+        _startFallbackContinuousTimer();
+      }
+    } else {
+      _startFallbackContinuousTimer();
+    }
+  }
+
+  Future<void> _stopContinuousCapture(CameraController controller) async {
+    _fallbackContinuousTimer?.cancel();
+    _fallbackContinuousTimer = null;
+    if (!_isStreamActive && !controller.value.isStreamingImages) {
+      return;
+    }
+    _isStreamActive = false;
+    try {
+      if (controller.value.isInitialized &&
+          controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+    } catch (_) {
+      // Ignore errors stopping an already-stopped image stream.
+    }
+  }
+
+  void _startFallbackContinuousTimer() {
+    if (_fallbackContinuousTimer != null) {
+      return;
+    }
+    _fallbackContinuousTimer = Timer.periodic(_fallbackCaptureInterval, (_) {
+      if (!mounted ||
+          !widget.isContinuous ||
+          widget.isPaused ||
+          _isProcessingFrame) {
+        return;
+      }
+      unawaited(_captureAndAnalyzePhoto(isFromContinuousFallback: true));
+    });
+  }
+
+  int _computeSensorRotationDegrees(CameraController controller) {
+    final description = controller.description;
+    final sensorOrientation = description.sensorOrientation;
+    final deviceDegrees = switch (controller.value.deviceOrientation) {
+      DeviceOrientation.portraitUp => 0,
+      DeviceOrientation.landscapeLeft => 90,
+      DeviceOrientation.portraitDown => 180,
+      DeviceOrientation.landscapeRight => 270,
+    };
+    if (description.lensDirection == CameraLensDirection.front) {
+      return (sensorOrientation + deviceDegrees) % 360;
+    }
+    return (sensorOrientation - deviceDegrees + 360) % 360;
+  }
+
+  void _onLiveCameraFrame(CameraImage image) {
+    if (!mounted ||
+        !widget.isContinuous ||
+        widget.isPaused ||
+        _isProcessingFrame ||
+        _isInitializingCamera ||
+        _isSwitchingCamera) {
+      return;
+    }
+    if (!widget.isBarcodeMode && !_isModelReady) {
+      return;
+    }
+
+    final cooldown =
+        widget.isBarcodeMode ? _liveBarcodeCooldown : _liveOcrCooldown;
+    final lastFinished = _lastFrameFinishedAt;
+    if (lastFinished != null &&
+        DateTime.now().difference(lastFinished) < cooldown) {
+      return;
+    }
+    if (image.planes.isEmpty) {
+      return;
+    }
+
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
+
+    final yPlane = image.planes.first;
+    // Copy luma bytes synchronously before the native ImageProxy is recycled.
+    final lumaCopy = Uint8List.fromList(yPlane.bytes);
+    final rotationDegrees = _computeSensorRotationDegrees(controller);
+    final viewportSize = _lastViewportSize ?? MediaQuery.sizeOf(context);
+    final cropRect = _computeNormalizedCropRect(viewportSize);
+
+    _isProcessingFrame = true;
+    unawaited(
+      _processLiveLumaFrame(
+        lumaBytes: lumaCopy,
+        width: image.width,
+        height: image.height,
+        rowStride: yPlane.bytesPerRow,
+        pixelStride: yPlane.bytesPerPixel ?? 1,
+        rotationDegrees: rotationDegrees,
+        cropRect: cropRect,
+        isBarcodeSnapshot: widget.isBarcodeMode,
+      ),
+    );
+  }
+
+  Future<void> _processLiveLumaFrame({
+    required Uint8List lumaBytes,
+    required int width,
+    required int height,
+    required int rowStride,
+    required int pixelStride,
+    required int rotationDegrees,
+    required Rect? cropRect,
+    required bool isBarcodeSnapshot,
+  }) async {
+    PreparedOcrImage? prepared;
+    try {
+      prepared = await widget.preprocessor.prepareStreamFrame(
+        lumaBytes: lumaBytes,
+        width: width,
+        height: height,
+        rowStride: rowStride,
+        pixelStride: pixelStride,
+        rotationDegrees: rotationDegrees,
+        gamma: _gamma,
+        hdrEnabled: _hdrEnabled,
+        cropRect: cropRect,
+      );
+      if (prepared == null || !mounted || widget.isPaused) {
+        return;
+      }
+
+      if (isBarcodeSnapshot) {
+        await _analyzeBarcodeAtPath(prepared.path, isManualSnap: false);
+      } else {
+        await _analyzeOcrAtPath(prepared.path, isManualSnap: false);
+      }
+    } catch (_) {
+      // Silently skip transient live frames so scanning never stalls or crashes.
+    } finally {
+      if (prepared != null && prepared.isTemporaryCopy) {
+        unawaited(widget.ocrService.deleteTempImage(prepared.path));
+      }
+      _lastFrameFinishedAt = DateTime.now();
+      _isProcessingFrame = false;
+    }
+  }
+
   Future<void> _setZoomScale(double normalizedZoom) async {
     final controller = _cameraController;
     final clamped = normalizedZoom.clamp(0.0, 1.0);
@@ -412,7 +688,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
     if (_maxZoom <= _minZoom) {
       return;
     }
-    // Map 0.5 -> 2x when supported so the 2x chip matches Barcode mode feel.
+    // Map 0.5 -> 2x when supported so the 2x chip matches standard zoom feel.
     final double targetZoom;
     if (_maxZoom >= 2.0) {
       if (clamped <= 0.5) {
@@ -456,14 +732,21 @@ class _OcrCameraViewState extends State<OcrCameraView>
     setState(() => _gamma = value.clamp(0.45, 2.0));
   }
 
-  Future<void> _applyLightingPreset(double ev, double gamma) async {
-    setState(() => _gamma = gamma.clamp(0.45, 2.0));
+  void _setHdrEnabled(bool enabled) {
+    setState(() => _hdrEnabled = enabled);
+  }
+
+  Future<void> _applyLightingPreset(double ev, double gamma, bool hdr) async {
+    setState(() {
+      _gamma = gamma.clamp(0.45, 2.0);
+      _hdrEnabled = hdr;
+    });
     if (_supportsExposureOffset) {
       await _setExposureOffset(ev);
     }
   }
 
-  Future<void> _resetLighting() => _applyLightingPreset(0.0, 1.0);
+  Future<void> _resetLighting() => _applyLightingPreset(0.0, 1.0, false);
 
   Future<void> _toggleTorch() async {
     final controller = _cameraController;
@@ -513,7 +796,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
       return null;
     }
     // Crop generously around the horizontal viewfinder reticle so off-center
-    // VIN plates are kept while trimming cluttered dashboard/windshield edges.
+    // VIN plates/barcodes are kept while trimming cluttered dashboard edges.
     final padX = math.max(widget.scanWindow.width * 0.05, 16.0) / width;
     final padY = math.max(widget.scanWindow.height * 0.90, 80.0) / height;
 
@@ -528,17 +811,251 @@ class _OcrCameraViewState extends State<OcrCameraView>
     return Rect.fromLTRB(left, top, right, bottom);
   }
 
-  Future<void> _captureAndRecognize() async {
+  void _setTransientBanner(
+    String message, {
+    required bool isError,
+    String? actionLabel,
+    VoidCallback? onAction,
+    Duration? autoClearAfter,
+  }) {
+    _transientStatusTimer?.cancel();
+    _transientStatusTimer = null;
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _statusMessage = message;
+      _statusIsError = isError;
+      _statusActionLabel = actionLabel;
+      _statusAction = onAction;
+    });
+    if (autoClearAfter != null) {
+      _transientStatusTimer = Timer(autoClearAfter, _clearStatusMessage);
+    }
+  }
+
+  void _clearStatusMessage() {
+    _transientStatusTimer?.cancel();
+    _transientStatusTimer = null;
+    if (mounted && (_statusMessage != null || _statusActionLabel != null)) {
+      setState(() {
+        _statusMessage = null;
+        _statusActionLabel = null;
+        _statusAction = null;
+      });
+    }
+  }
+
+  Future<void> _analyzeBarcodeAtPath(
+    String imagePath, {
+    required bool isManualSnap,
+  }) async {
+    final analyzer = widget.onAnalyzeBarcodeImage;
+    if (analyzer == null) {
+      if (isManualSnap) {
+        _setTransientBanner(
+          'Barcode image analysis is unavailable on this platform.',
+          isError: true,
+        );
+      }
+      return;
+    }
+
+    final capture = await analyzer(imagePath);
+    if (!mounted || widget.isPaused) {
+      return;
+    }
+
+    final barcodes = capture?.barcodes ?? const [];
+    String? normalFallbackCandidate;
+
+    for (final barcode in barcodes) {
+      final candidate = widget.validator.extractFromBarcode(
+            barcode.rawValue,
+            strictness: widget.strictness,
+          ) ??
+          widget.validator.extractFromBarcode(
+            barcode.displayValue,
+            strictness: widget.strictness,
+          );
+      if (candidate != null) {
+        _clearStatusMessage();
+        widget.onVinRecognized(candidate);
+        return;
+      }
+
+      if (widget.strictness == VinScanStrictness.strict &&
+          normalFallbackCandidate == null) {
+        normalFallbackCandidate = widget.validator.extractFromBarcode(
+              barcode.rawValue,
+              strictness: VinScanStrictness.normal,
+            ) ??
+            widget.validator.extractFromBarcode(
+              barcode.displayValue,
+              strictness: VinScanStrictness.normal,
+            );
+      }
+    }
+
+    if (normalFallbackCandidate != null) {
+      final recoveredVin = normalFallbackCandidate;
+      _setTransientBanner(
+        'Extra barcode characters detected ($recoveredVin)',
+        isError: true,
+        actionLabel: 'Use Normal',
+        onAction: () {
+          widget.onSwitchStrictnessToNormal?.call();
+          widget.onVinRecognized(recoveredVin);
+        },
+        autoClearAfter: isManualSnap ? null : const Duration(seconds: 4),
+      );
+      return;
+    }
+
+    if (barcodes.isNotEmpty) {
+      _setTransientBanner(
+        widget.strictness == VinScanStrictness.strict
+            ? 'Barcode is not an exact 17-character VIN'
+            : 'Scanned barcode does not contain a valid VIN',
+        isError: true,
+        autoClearAfter: isManualSnap ? null : const Duration(seconds: 2),
+      );
+      return;
+    }
+
+    if (isManualSnap) {
+      final isNeutralLighting =
+          !_hdrEnabled &&
+          _exposureOffset.abs() < 0.05 &&
+          (_gamma - 1.0).abs() < 0.05;
+      if (isNeutralLighting) {
+        _setTransientBanner(
+          'No barcode detected — try HDR or adjusting Exposure/Gamma',
+          isError: true,
+          actionLabel: 'Lighting',
+          onAction: () {
+            if (mounted) {
+              setState(() => _isLightingPanelExpanded = true);
+            }
+          },
+        );
+      } else {
+        _setTransientBanner(
+          'No VIN barcode detected in photo — try holding steady or OCR mode',
+          isError: true,
+          actionLabel: 'Manual',
+          onAction: () => widget.onManualEntryTap(null),
+        );
+      }
+    }
+  }
+
+  Future<void> _analyzeOcrAtPath(
+    String imagePath, {
+    required bool isManualSnap,
+  }) async {
+    final ocrResult = await widget.ocrService.recognizeText(imagePath);
+    if (!mounted || widget.isPaused) {
+      return;
+    }
+
+    final lines = ocrResult.orderedLines;
+    final extraction = widget.validator.extractFromOcrText(
+      lines,
+      strictness: widget.strictness,
+    );
+
+    if (extraction.vin != null) {
+      _clearStatusMessage();
+      widget.onVinRecognized(extraction.vin!);
+      return;
+    }
+
+    // If Strict mode missed a VIN that Normal mode can recover, offer a 1-tap switch.
+    if (widget.strictness == VinScanStrictness.strict &&
+        widget.onSwitchStrictnessToNormal != null) {
+      final normalFallback = widget.validator.extractFromOcrText(
+        lines,
+        strictness: VinScanStrictness.normal,
+      );
+      if (normalFallback.vin != null) {
+        _setTransientBanner(
+          'Possible VIN (${normalFallback.vin}) needs Normal mode',
+          isError: true,
+          actionLabel: 'Use Normal',
+          onAction: () {
+            widget.onSwitchStrictnessToNormal?.call();
+            widget.onVinRecognized(normalFallback.vin!);
+          },
+          autoClearAfter: isManualSnap ? null : const Duration(seconds: 4),
+        );
+        return;
+      }
+    }
+
+    final snippet = extraction.bestSnippet;
+    if (snippet != null && snippet.isNotEmpty) {
+      _setTransientBanner(
+        'Partial read: $snippet',
+        isError: true,
+        actionLabel: 'Edit',
+        onAction: () => widget.onManualEntryTap(snippet),
+        autoClearAfter: isManualSnap ? null : const Duration(seconds: 3),
+      );
+      return;
+    }
+
+    if (!isManualSnap) {
+      return;
+    }
+
+    final isNeutralLighting =
+        !_hdrEnabled &&
+        _exposureOffset.abs() < 0.05 &&
+        (_gamma - 1.0).abs() < 0.05;
+    if (lines.isEmpty) {
+      if (isNeutralLighting) {
+        _setTransientBanner(
+          'No text detected — try HDR or adjusting Exposure/Gamma',
+          isError: true,
+          actionLabel: 'Lighting',
+          onAction: () {
+            if (mounted) {
+              setState(() => _isLightingPanelExpanded = true);
+            }
+          },
+        );
+      } else {
+        _setTransientBanner(
+          'No text detected — hold steady or try another preset',
+          isError: true,
+          actionLabel: 'Manual',
+          onAction: () => widget.onManualEntryTap(null),
+        );
+      }
+    } else {
+      _setTransientBanner(
+        'No valid 17-character VIN found in frame',
+        isError: true,
+        actionLabel: 'Manual',
+        onAction: () => widget.onManualEntryTap(null),
+      );
+    }
+  }
+
+  Future<void> _captureAndAnalyzePhoto({
+    bool isFromContinuousFallback = false,
+  }) async {
     final controller = _cameraController;
     if (controller == null ||
         !controller.value.isInitialized ||
         controller.value.isTakingPicture ||
-        _isProcessingOcr ||
+        _isProcessingFrame ||
         widget.isPaused) {
       return;
     }
 
-    if (!_isModelReady) {
+    if (!widget.isBarcodeMode && !_isModelReady) {
       await _ensureModelsReady();
       if (!mounted || !_isModelReady) {
         return;
@@ -548,14 +1065,21 @@ class _OcrCameraViewState extends State<OcrCameraView>
     final viewportSize = _lastViewportSize ?? MediaQuery.sizeOf(context);
     final cropRect = _computeNormalizedCropRect(viewportSize);
     final activeGamma = _gamma;
+    final activeHdr = _hdrEnabled;
+    final isBarcodeSnapshot = widget.isBarcodeMode;
 
-    setState(() {
-      _isProcessingOcr = true;
-      _statusMessage = 'Looking for text...';
-      _statusIsError = false;
-      _statusActionLabel = null;
-      _statusAction = null;
-    });
+    if (!isFromContinuousFallback) {
+      setState(() {
+        _isProcessingFrame = true;
+        _statusMessage =
+            isBarcodeSnapshot ? 'Looking for barcode...' : 'Looking for text...';
+        _statusIsError = false;
+        _statusActionLabel = null;
+        _statusAction = null;
+      });
+    } else {
+      _isProcessingFrame = true;
+    }
 
     String? rawImagePath;
     PreparedOcrImage? preparedImage;
@@ -565,126 +1089,57 @@ class _OcrCameraViewState extends State<OcrCameraView>
       preparedImage = await widget.preprocessor.prepareForOcr(
         imagePath: rawImagePath,
         gamma: activeGamma,
+        hdrEnabled: activeHdr,
         cropRect: cropRect,
       );
-      final ocrResult = await widget.ocrService.recognizeText(
-        preparedImage.path,
-      );
-      if (!mounted) {
-        return;
-      }
-
-      final lines = ocrResult.orderedLines;
-      final extraction = widget.validator.extractFromOcrText(
-        lines,
-        strictness: widget.strictness,
-      );
-
-      if (extraction.vin != null) {
-        setState(() {
-          _isProcessingOcr = false;
-          _statusMessage = null;
-          _statusActionLabel = null;
-          _statusAction = null;
-        });
-        widget.onVinRecognized(extraction.vin!);
-        return;
-      }
-
-      // If Strict mode missed a VIN that Normal mode can recover, offer a 1-tap switch.
-      if (widget.strictness == VinScanStrictness.strict &&
-          widget.onSwitchStrictnessToNormal != null) {
-        final normalFallback = widget.validator.extractFromOcrText(
-          lines,
-          strictness: VinScanStrictness.normal,
+      if (isBarcodeSnapshot) {
+        await _analyzeBarcodeAtPath(
+          preparedImage.path,
+          isManualSnap: !isFromContinuousFallback,
         );
-        if (normalFallback.vin != null) {
-          setState(() {
-            _isProcessingOcr = false;
-            _statusMessage =
-                'Possible VIN (${normalFallback.vin}) needs Normal mode';
-            _statusIsError = true;
-            _statusActionLabel = 'Use Normal';
-            _statusAction = () {
-              widget.onSwitchStrictnessToNormal?.call();
-              widget.onVinRecognized(normalFallback.vin!);
-            };
-          });
-          return;
-        }
+      } else {
+        await _analyzeOcrAtPath(
+          preparedImage.path,
+          isManualSnap: !isFromContinuousFallback,
+        );
       }
-
-      final snippet = extraction.bestSnippet;
-      final isNeutralLighting =
-          _exposureOffset.abs() < 0.05 && (_gamma - 1.0).abs() < 0.05;
-      setState(() {
-        _isProcessingOcr = false;
-        _statusIsError = true;
-        if (snippet != null && snippet.isNotEmpty) {
-          _statusMessage = 'Partial read: $snippet';
-          _statusActionLabel = 'Edit';
-          _statusAction = () => widget.onManualEntryTap(snippet);
-        } else if (lines.isEmpty) {
-          if (isNeutralLighting) {
-            _statusMessage = 'No text detected — try adjusting Exposure/Gamma';
-            _statusActionLabel = 'Lighting';
-            _statusAction = () {
-              if (mounted) {
-                setState(() => _isLightingPanelExpanded = true);
-              }
-            };
-          } else {
-            _statusMessage =
-                'No text detected — hold steady or try another preset';
-            _statusActionLabel = 'Manual';
-            _statusAction = () => widget.onManualEntryTap(null);
-          }
-        } else {
-          _statusMessage = 'No valid 17-character VIN found in frame';
-          _statusActionLabel = 'Manual';
-          _statusAction = () => widget.onManualEntryTap(null);
-        }
-      });
     } on VinOcrException catch (error) {
-      if (!mounted) {
+      if (!mounted || isFromContinuousFallback) {
         return;
       }
-      setState(() {
-        _isProcessingOcr = false;
-        _statusMessage = error.message;
-        _statusIsError = true;
-        _statusActionLabel = 'Retry';
-        _statusAction = () => unawaited(_captureAndRecognize());
-      });
+      _setTransientBanner(
+        error.message,
+        isError: true,
+        actionLabel: 'Retry',
+        onAction: () => unawaited(_captureAndAnalyzePhoto()),
+      );
     } on CameraException catch (error) {
-      if (!mounted) {
+      if (!mounted || isFromContinuousFallback) {
         return;
       }
-      setState(() {
-        _isProcessingOcr = false;
-        _statusMessage =
-            error.description ?? 'Camera capture failed. Please try again.';
-        _statusIsError = true;
-        _statusActionLabel = null;
-        _statusAction = null;
-      });
+      _setTransientBanner(
+        error.description ?? 'Camera capture failed. Please try again.',
+        isError: true,
+      );
     } catch (_) {
-      if (!mounted) {
+      if (!mounted || isFromContinuousFallback) {
         return;
       }
-      setState(() {
-        _isProcessingOcr = false;
-        _statusMessage = 'OCR capture failed. Please try again.';
-        _statusIsError = true;
-        _statusActionLabel = null;
-        _statusAction = null;
-      });
+      _setTransientBanner(
+        'Capture failed. Please try again.',
+        isError: true,
+      );
     } finally {
       if (rawImagePath != null) {
         unawaited(widget.ocrService.deleteTempImage(rawImagePath));
       }
       if (preparedImage != null && preparedImage.isTemporaryCopy) {
         unawaited(widget.ocrService.deleteTempImage(preparedImage.path));
+      }
+      if (mounted && !isFromContinuousFallback) {
+        setState(() => _isProcessingFrame = false);
+      } else {
+        _isProcessingFrame = false;
       }
       if (mounted && widget.isPaused) {
         final activeController = _cameraController;
@@ -697,9 +1152,29 @@ class _OcrCameraViewState extends State<OcrCameraView>
 
   @override
   void dispose() {
+    _transientStatusTimer?.cancel();
+    _fallbackContinuousTimer?.cancel();
+    widget.switchCameraSignal?.removeListener(_onSwitchCameraRequested);
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_disposeCamera());
     super.dispose();
+  }
+
+  String _buildPromptText() {
+    if (!widget.isBarcodeMode && _isPreparingModels) {
+      return 'Preparing PaddleOCR v5 models...';
+    }
+    final strictnessLabel =
+        widget.strictness == VinScanStrictness.normal ? 'Normal' : 'Strict';
+    final hdrTag = _hdrEnabled ? ' • HDR' : '';
+    if (widget.isBarcodeMode) {
+      return widget.isContinuous
+          ? 'Align VIN barcode ($strictnessLabel$hdrTag)'
+          : 'Align VIN barcode & tap Snap ($strictnessLabel$hdrTag)';
+    }
+    return widget.isContinuous
+        ? 'Live OCR scanning printed VIN ($strictnessLabel$hdrTag)'
+        : 'Align printed VIN & tap Snap ($strictnessLabel$hdrTag)';
   }
 
   @override
@@ -707,9 +1182,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
     final colorScheme = Theme.of(context).colorScheme;
     final controller = _cameraController;
     final isReady = controller != null && controller.value.isInitialized;
-    final strictnessLabel =
-        widget.strictness == VinScanStrictness.normal ? 'Normal' : 'Strict';
-    final applyPreviewGamma = (_gamma - 1.0).abs() >= 0.02;
+    final applyPreviewFilter = _hdrEnabled || (_gamma - 1.0).abs() >= 0.02;
 
     if (_cameraError != null) {
       return ColoredBox(
@@ -734,7 +1207,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
                     Text(
                       _isPermissionDenied
                           ? 'Camera Permission Required'
-                          : 'OCR Camera Unavailable',
+                          : 'Camera Unavailable',
                       style: Theme.of(context).textTheme.titleLarge?.copyWith(
                             fontWeight: FontWeight.w700,
                           ),
@@ -786,6 +1259,18 @@ class _OcrCameraViewState extends State<OcrCameraView>
       );
     }
 
+    final showSnapButton = !widget.isContinuous;
+    final String? snapLabel;
+    if (!showSnapButton) {
+      snapLabel = null;
+    } else if (_isProcessingFrame) {
+      snapLabel = widget.isBarcodeMode ? 'Scanning...' : 'Reading VIN...';
+    } else if (!widget.isBarcodeMode && _isPreparingModels) {
+      snapLabel = 'Preparing OCR...';
+    } else {
+      snapLabel = widget.isBarcodeMode ? 'Snap Barcode' : 'Snap VIN (OCR)';
+    }
+
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
@@ -814,10 +1299,13 @@ class _OcrCameraViewState extends State<OcrCameraView>
                         child: CameraPreview(controller),
                       ),
                     );
-              final filteredPreview = applyPreviewGamma
+              final filteredPreview = applyPreviewFilter
                   ? ColorFiltered(
                       colorFilter: ColorFilter.matrix(
-                        OcrImagePreprocessor.buildPreviewGammaMatrix(_gamma),
+                        OcrImagePreprocessor.buildPreviewColorMatrix(
+                          gamma: _gamma,
+                          hdrEnabled: _hdrEnabled,
+                        ),
                       ),
                       child: rawPreview,
                     )
@@ -841,7 +1329,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
                   if (_isInitializingCamera) ...<Widget>[
                     const SizedBox(height: 12),
                     const Text(
-                      'Starting OCR camera...',
+                      'Starting camera...',
                       style: TextStyle(color: Colors.white70, fontSize: 13),
                     ),
                   ],
@@ -852,11 +1340,10 @@ class _OcrCameraViewState extends State<OcrCameraView>
         ScannerOverlay(
           scanWindow: widget.scanWindow,
           isPaused: widget.isPaused || !isReady,
-          showScanLine: false,
-          promptText: _isPreparingModels
-              ? 'Preparing PaddleOCR v5 models...'
-              : 'Align printed VIN text & tap Read VIN ($strictnessLabel)',
-          statusMessage: _statusMessage ?? _modelError,
+          showScanLine: widget.isContinuous,
+          promptText: _buildPromptText(),
+          statusMessage:
+              _statusMessage ?? (!widget.isBarcodeMode ? _modelError : null),
           statusIsError: _statusMessage != null ? _statusIsError : true,
           statusActionLabel: _statusActionLabel,
           onStatusAction: _statusAction,
@@ -873,13 +1360,14 @@ class _OcrCameraViewState extends State<OcrCameraView>
             onZoomChanged: (value) => unawaited(_setZoomScale(value)),
             onToggleTorch: () => unawaited(_toggleTorch()),
             onManualEntryTap: () => widget.onManualEntryTap(null),
-            primaryActionLabel: _isProcessingOcr
-                ? 'Reading VIN...'
-                : (_isPreparingModels ? 'Preparing OCR...' : 'Read VIN (OCR)'),
-            primaryActionIcon: Icons.document_scanner_rounded,
-            isPrimaryBusy: _isProcessingOcr || _isPreparingModels,
+            primaryActionLabel: snapLabel,
+            primaryActionIcon: widget.isBarcodeMode
+                ? Icons.camera_alt_rounded
+                : Icons.document_scanner_rounded,
+            isPrimaryBusy:
+                _isProcessingFrame || (!widget.isBarcodeMode && _isPreparingModels),
             onPrimaryActionTap: isReady && !widget.isPaused
-                ? () => unawaited(_captureAndRecognize())
+                ? () => unawaited(_captureAndAnalyzePhoto())
                 : null,
             showLightingControls: true,
             isLightingExpanded: _isLightingPanelExpanded,
@@ -893,9 +1381,11 @@ class _OcrCameraViewState extends State<OcrCameraView>
             onExposureChanged: (ev) => unawaited(_setExposureOffset(ev)),
             gamma: _gamma,
             onGammaChanged: _setGamma,
+            hdrEnabled: _hdrEnabled,
+            onHdrChanged: _setHdrEnabled,
             onResetLighting: () => unawaited(_resetLighting()),
-            onApplyLightingPreset: (ev, gamma) =>
-                unawaited(_applyLightingPreset(ev, gamma)),
+            onApplyLightingPreset: (ev, gamma, hdr) =>
+                unawaited(_applyLightingPreset(ev, gamma, hdr)),
           ),
         ),
       ],

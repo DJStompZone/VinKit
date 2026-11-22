@@ -84,6 +84,7 @@ class MainActivity : FlutterActivity() {
                         return@setMethodCallHandler
                     }
                     val gamma = (call.argument<Double>("gamma") ?: 1.0).coerceIn(0.35, 2.5)
+                    val hdr = call.argument<Boolean>("hdr") ?: false
                     val cropLeft = call.argument<Double>("cropLeft")
                     val cropTop = call.argument<Double>("cropTop")
                     val cropRight = call.argument<Double>("cropRight")
@@ -96,6 +97,47 @@ class MainActivity : FlutterActivity() {
                         val preparedPath = prepareOcrImage(
                             imagePath = imagePath,
                             gamma = gamma,
+                            hdr = hdr,
+                            cropLeft = cropLeft,
+                            cropTop = cropTop,
+                            cropRight = cropRight,
+                            cropBottom = cropBottom,
+                            maxDimension = maxDimension,
+                        )
+                        mainHandler.post { result.success(preparedPath) }
+                    }
+                }
+
+                "prepareStreamFrame" -> {
+                    val lumaBytes = call.argument<ByteArray>("lumaBytes")
+                    val width = call.argument<Int>("width") ?: 0
+                    val height = call.argument<Int>("height") ?: 0
+                    val rowStride = call.argument<Int>("rowStride") ?: width
+                    val pixelStride = (call.argument<Int>("pixelStride") ?: 1).coerceAtLeast(1)
+                    val rotationDegrees = call.argument<Int>("rotationDegrees") ?: 0
+                    if (lumaBytes == null || width <= 0 || height <= 0) {
+                        result.success(null)
+                        return@setMethodCallHandler
+                    }
+                    val gamma = (call.argument<Double>("gamma") ?: 1.0).coerceIn(0.35, 2.5)
+                    val hdr = call.argument<Boolean>("hdr") ?: false
+                    val cropLeft = call.argument<Double>("cropLeft")
+                    val cropTop = call.argument<Double>("cropTop")
+                    val cropRight = call.argument<Double>("cropRight")
+                    val cropBottom = call.argument<Double>("cropBottom")
+                    val maxDimension =
+                        (call.argument<Int>("maxDimension") ?: 1280).coerceIn(480, 1800)
+
+                    ocrPrepExecutor.execute {
+                        val preparedPath = prepareStreamLumaFrame(
+                            lumaBytes = lumaBytes,
+                            width = width,
+                            height = height,
+                            rowStride = rowStride,
+                            pixelStride = pixelStride,
+                            rotationDegrees = rotationDegrees,
+                            gamma = gamma,
+                            hdr = hdr,
                             cropLeft = cropLeft,
                             cropTop = cropTop,
                             cropRight = cropRight,
@@ -114,6 +156,7 @@ class MainActivity : FlutterActivity() {
     private fun prepareOcrImage(
         imagePath: String,
         gamma: Double,
+        hdr: Boolean,
         cropLeft: Double?,
         cropTop: Double?,
         cropRight: Double?,
@@ -214,8 +257,8 @@ class MainActivity : FlutterActivity() {
             }
 
             val targetBitmap = scaled ?: return null
-            working = if (abs(gamma - 1.0) > 0.02) {
-                applyGammaLut(targetBitmap, gamma)
+            working = if (hdr || abs(gamma - 1.0) > 0.02) {
+                applyToneAdjustments(targetBitmap, gamma = gamma, hdr = hdr)
             } else {
                 targetBitmap
             }
@@ -248,6 +291,123 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun prepareStreamLumaFrame(
+        lumaBytes: ByteArray,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int,
+        rotationDegrees: Int,
+        gamma: Double,
+        hdr: Boolean,
+        cropLeft: Double?,
+        cropTop: Double?,
+        cropRight: Double?,
+        cropBottom: Double?,
+        maxDimension: Int,
+    ): String? {
+        var roiBitmap: Bitmap? = null
+        var scaledBitmap: Bitmap? = null
+        return try {
+            val normalizedRot = ((rotationDegrees % 360) + 360) % 360
+            val rotW = if (normalizedRot == 90 || normalizedRot == 270) height else width
+            val rotH = if (normalizedRot == 90 || normalizedRot == 270) width else height
+
+            val left = ((cropLeft ?: 0.0).coerceIn(0.0, 0.95) * rotW).roundToInt()
+            val top = ((cropTop ?: 0.0).coerceIn(0.0, 0.95) * rotH).roundToInt()
+            val right = ((cropRight ?: 1.0).coerceIn(0.05, 1.0) * rotW).roundToInt()
+            val bottom = ((cropBottom ?: 1.0).coerceIn(0.05, 1.0) * rotH).roundToInt()
+            val cropW = (right - left).coerceAtLeast(1)
+            val cropH = (bottom - top).coerceAtLeast(1)
+            if (cropW < 32 || cropH < 24 || left + cropW > rotW || top + cropH > rotH) {
+                return null
+            }
+
+            val luma = IntArray(cropW * cropH)
+            val bytesLen = lumaBytes.size
+            for (y in 0 until cropH) {
+                val uy = top + y
+                val rowOffset = y * cropW
+                for (x in 0 until cropW) {
+                    val ux = left + x
+                    val sx: Int
+                    val sy: Int
+                    when (normalizedRot) {
+                        90 -> {
+                            sx = uy
+                            sy = height - 1 - ux
+                        }
+                        180 -> {
+                            sx = width - 1 - ux
+                            sy = height - 1 - uy
+                        }
+                        270 -> {
+                            sx = width - 1 - uy
+                            sy = ux
+                        }
+                        else -> {
+                            sx = ux
+                            sy = uy
+                        }
+                    }
+                    val idx = sy * rowStride + sx * pixelStride
+                    luma[rowOffset + x] =
+                        if (idx in 0 until bytesLen) lumaBytes[idx].toInt() and 0xFF else 0
+                }
+            }
+
+            if (hdr) {
+                applyHdrToLumaInPlace(luma, cropW, cropH)
+            }
+            if (abs(gamma - 1.0) > 0.02) {
+                val lut = buildGammaLut(gamma)
+                for (i in luma.indices) {
+                    luma[i] = lut[luma[i]]
+                }
+            }
+
+            val pixels = IntArray(cropW * cropH) { i ->
+                val v = luma[i]
+                -0x1000000 or (v shl 16) or (v shl 8) or v
+            }
+            roiBitmap = Bitmap.createBitmap(pixels, cropW, cropH, Bitmap.Config.ARGB_8888)
+            val longest = max(cropW, cropH)
+            scaledBitmap = if (longest > maxDimension) {
+                val ratio = maxDimension.toFloat() / longest.toFloat()
+                val targetW = max(32, (cropW * ratio).roundToInt())
+                val targetH = max(24, (cropH * ratio).roundToInt())
+                Bitmap.createScaledBitmap(roiBitmap, targetW, targetH, true)
+            } else {
+                roiBitmap
+            }
+
+            val outputDir = File(cacheDir, "ocr_prep").apply {
+                if (!exists()) {
+                    mkdirs()
+                }
+            }
+            val outputFile = File(outputDir, "vin_live_${System.nanoTime()}.jpg")
+            FileOutputStream(outputFile).use { stream ->
+                val ok = scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+                if (!ok) {
+                    outputFile.delete()
+                    return null
+                }
+            }
+            outputFile.absolutePath
+        } catch (t: Throwable) {
+            android.util.Log.e("OcrImagePrep", "Failed preparing live stream frame", t)
+            null
+        } finally {
+            if (scaledBitmap != null && scaledBitmap !== roiBitmap && !scaledBitmap.isRecycled) {
+                scaledBitmap.recycle()
+            }
+            if (roiBitmap != null && !roiBitmap.isRecycled) {
+                roiBitmap.recycle()
+            }
+        }
+    }
+
     private fun applyExifOrientation(source: Bitmap, orientation: Int): Bitmap {
         val matrix = Matrix()
         var transformed = true
@@ -275,11 +435,80 @@ class MainActivity : FlutterActivity() {
         return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
     }
 
-    private fun applyGammaLut(source: Bitmap, gamma: Double): Bitmap {
+    private fun buildGammaLut(gamma: Double): IntArray {
         val invGamma = 1.0 / gamma
-        val lut = IntArray(256) { value ->
+        return IntArray(256) { value ->
             ((value / 255.0).pow(invGamma) * 255.0).roundToInt().coerceIn(0, 255)
         }
+    }
+
+    private fun buildHdrStretchLut(histogram: IntArray, totalPixels: Int): IntArray {
+        val lowTarget = (totalPixels * 0.02).toInt()
+        val highTarget = (totalPixels * 0.98).toInt()
+        var cumulative = 0
+        var pLow = 0
+        var pHigh = 255
+        var foundLow = false
+        for (bin in 0..255) {
+            cumulative += histogram[bin]
+            if (!foundLow && cumulative >= lowTarget) {
+                pLow = bin
+                foundLow = true
+            }
+            if (cumulative >= highTarget) {
+                pHigh = bin
+                break
+            }
+        }
+
+        // Prevent amplifying flat sensor noise on blank frames.
+        if (pHigh - pLow < 24) {
+            val mid = (pLow + pHigh) / 2
+            pLow = (mid - 12).coerceAtLeast(0)
+            pHigh = (mid + 12).coerceAtMost(255)
+        }
+        val spread = max(1, pHigh - pLow).toDouble()
+
+        return IntArray(256) { v ->
+            val t = ((v - pLow) / spread).coerceIn(0.0, 1.0)
+            // Monotonic shadow-lift & highlight-recovery tone curve.
+            val lifted = (t + 0.46 * (1.0 - t) * (1.0 - t) * t).coerceIn(0.0, 1.0)
+            (lifted * 255.0).roundToInt().coerceIn(0, 255)
+        }
+    }
+
+    private fun applyHdrToLumaInPlace(luma: IntArray, width: Int, height: Int) {
+        val histogram = IntArray(256)
+        for (v in luma) {
+            histogram[v]++
+        }
+        val hdrLut = buildHdrStretchLut(histogram, luma.size)
+        for (i in luma.indices) {
+            luma[i] = hdrLut[luma[i]]
+        }
+
+        // Subtle 3x3 unsharp mask to crisp up barcode edges & etched VIN characters.
+        if (width < 3 || height < 3) {
+            return
+        }
+        val copy = luma.copyOf()
+        for (y in 1 until height - 1) {
+            val row = y * width
+            val prevRow = row - width
+            val nextRow = row + width
+            for (x in 1 until width - 1) {
+                val sum = copy[prevRow + x - 1] + copy[prevRow + x] + copy[prevRow + x + 1] +
+                    copy[row + x - 1] + copy[row + x] + copy[row + x + 1] +
+                    copy[nextRow + x - 1] + copy[nextRow + x] + copy[nextRow + x + 1]
+                val avg = sum / 9
+                val center = copy[row + x]
+                val sharpened = center + ((center - avg) * 42) / 100
+                luma[row + x] = sharpened.coerceIn(0, 255)
+            }
+        }
+    }
+
+    private fun applyToneAdjustments(source: Bitmap, gamma: Double, hdr: Boolean): Bitmap {
         val width = source.width
         val height = source.height
         val mutable = if (source.isMutable && source.config == Bitmap.Config.ARGB_8888) {
@@ -289,14 +518,48 @@ class MainActivity : FlutterActivity() {
         }
         val pixels = IntArray(width * height)
         mutable.getPixels(pixels, 0, width, 0, 0, width, height)
-        for (i in pixels.indices) {
-            val px = pixels[i]
-            val a = px and -0x1000000
-            val r = lut[(px shr 16) and 0xFF]
-            val g = lut[(px shr 8) and 0xFF]
-            val b = lut[px and 0xFF]
-            pixels[i] = a or (r shl 16) or (g shl 8) or b
+
+        if (hdr) {
+            val luma = IntArray(pixels.size)
+            for (i in pixels.indices) {
+                val px = pixels[i]
+                val r = (px shr 16) and 0xFF
+                val g = (px shr 8) and 0xFF
+                val b = px and 0xFF
+                luma[i] = (77 * r + 150 * g + 29 * b) shr 8
+            }
+            val origLuma = luma.copyOf()
+            applyHdrToLumaInPlace(luma, width, height)
+
+            for (i in pixels.indices) {
+                val px = pixels[i]
+                val a = px and -0x1000000
+                val oldY = origLuma[i]
+                val newY = luma[i]
+                if (oldY <= 2) {
+                    pixels[i] = a or (newY shl 16) or (newY shl 8) or newY
+                } else {
+                    val scale = newY.toFloat() / oldY.toFloat()
+                    val r = (((px shr 16) and 0xFF) * scale).roundToInt().coerceIn(0, 255)
+                    val g = (((px shr 8) and 0xFF) * scale).roundToInt().coerceIn(0, 255)
+                    val b = ((px and 0xFF) * scale).roundToInt().coerceIn(0, 255)
+                    pixels[i] = a or (r shl 16) or (g shl 8) or b
+                }
+            }
         }
+
+        if (abs(gamma - 1.0) > 0.02) {
+            val lut = buildGammaLut(gamma)
+            for (i in pixels.indices) {
+                val px = pixels[i]
+                val a = px and -0x1000000
+                val r = lut[(px shr 16) and 0xFF]
+                val g = lut[(px shr 8) and 0xFF]
+                val b = lut[px and 0xFF]
+                pixels[i] = a or (r shl 16) or (g shl 8) or b
+            }
+        }
+
         mutable.setPixels(pixels, 0, width, 0, 0, width, height)
         return mutable
     }

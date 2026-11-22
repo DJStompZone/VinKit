@@ -585,9 +585,9 @@ void main() {
     );
   });
 
-  group('ScannerScreen OCR mode & HUD toggles', () {
+  group('ScannerScreen Barcode/OCR & Live/Snap HUD toggles', () {
     testWidgets(
-      'switches between Barcode and OCR modes, updates Strictness, and plays beep on OCR VIN lock',
+      'supports Live and Snap modes in both Barcode and OCR, updates Strictness, and plays beep on VIN lock',
       (tester) async {
         final controller = VinLookupController(
           service: _FakeVinLookupService((_) async => _explorerResult()),
@@ -614,21 +614,25 @@ void main() {
                 required strictness,
                 required scanWindow,
                 required isPaused,
+                required isBarcodeMode,
+                required isContinuous,
                 required onVinRecognized,
                 required onManualEntryTap,
                 required onSwitchStrictnessToNormal,
               }) {
+                final target = isBarcodeMode ? 'barcode' : 'ocr';
+                final cadence = isContinuous ? 'live' : 'snap';
                 return ColoredBox(
                   color: Colors.black,
                   child: Center(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
-                        Text('Mock OCR (${strictness.name})'),
+                        Text('Mock $target/$cadence (${strictness.name})'),
                         FilledButton(
                           onPressed: () =>
                               onVinRecognized('1FM5K8GCXNGA77516'),
-                          child: const Text('Simulate OCR Read'),
+                          child: const Text('Simulate VIN Read'),
                         ),
                       ],
                     ),
@@ -642,21 +646,41 @@ void main() {
 
         expect(find.text('Barcode'), findsOneWidget);
         expect(find.text('OCR'), findsOneWidget);
+        expect(find.text('Live'), findsOneWidget);
+        expect(find.text('Snap'), findsOneWidget);
         expect(find.text('Normal'), findsOneWidget);
         expect(find.text('Strict'), findsOneWidget);
 
-        // Switch to OCR mode.
+        // Starts in Barcode + Live + Normal.
+        expect(find.text('Mock barcode/live (normal)'), findsOneWidget);
+
+        // Switch Barcode to Snap mode.
+        await tester.tap(find.text('Snap'));
+        await tester.pumpAndSettle();
+        expect(find.text('Mock barcode/snap (normal)'), findsOneWidget);
+
+        // Switch to OCR mode (defaults to Snap).
         await tester.tap(find.text('OCR'));
         await tester.pumpAndSettle();
-        expect(find.text('Mock OCR (normal)'), findsOneWidget);
+        expect(find.text('Mock ocr/snap (normal)'), findsOneWidget);
 
-        // Toggle strictness to Strict while in OCR mode.
+        // Switch OCR to Live continuous mode.
+        await tester.tap(find.text('Live'));
+        await tester.pumpAndSettle();
+        expect(find.text('Mock ocr/live (normal)'), findsOneWidget);
+
+        // Toggle strictness to Strict while in OCR Live mode.
         await tester.tap(find.text('Strict'));
         await tester.pump();
-        expect(find.text('Mock OCR (strict)'), findsOneWidget);
+        expect(find.text('Mock ocr/live (strict)'), findsOneWidget);
 
-        // Simulate successful OCR VIN recognition -> instant BEEP + full spec screen.
-        await tester.tap(find.text('Simulate OCR Read'));
+        // Switching back to Barcode remembers its Snap selection.
+        await tester.tap(find.text('Barcode'));
+        await tester.pumpAndSettle();
+        expect(find.text('Mock barcode/snap (strict)'), findsOneWidget);
+
+        // Simulate successful VIN lock -> instant BEEP + full spec screen.
+        await tester.tap(find.text('Simulate VIN Read'));
         await tester.pumpAndSettle();
 
         expect(feedback.playCount, 1);
@@ -691,9 +715,9 @@ void main() {
     });
   });
 
-  group('ScannerControls Exposure & Gamma HUD', () {
+  group('ScannerControls Exposure, Gamma & HDR HUD', () {
     testWidgets(
-      'expands lighting controls, applies Glare/Dark/Auto presets, and fits narrow screens',
+      'expands lighting controls, toggles HDR, applies Glare/Dark/Auto presets, and fits narrow screens',
       (tester) async {
         tester.view.physicalSize = const Size(360, 740);
         tester.view.devicePixelRatio = 1.0;
@@ -703,6 +727,7 @@ void main() {
         var isExpanded = false;
         var ev = 0.0;
         var gamma = 1.0;
+        var hdr = false;
 
         await tester.pumpWidget(
           MaterialApp(
@@ -719,7 +744,7 @@ void main() {
                     onZoomChanged: (_) {},
                     onToggleTorch: () {},
                     onManualEntryTap: () {},
-                    primaryActionLabel: 'Read VIN (OCR)',
+                    primaryActionLabel: 'Snap VIN (OCR)',
                     onPrimaryActionTap: () {},
                     showLightingControls: true,
                     isLightingExpanded: isExpanded,
@@ -732,13 +757,18 @@ void main() {
                     onExposureChanged: (next) => setState(() => ev = next),
                     gamma: gamma,
                     onGammaChanged: (next) => setState(() => gamma = next),
+                    hdrEnabled: hdr,
+                    onHdrChanged: (next) => setState(() => hdr = next),
                     onResetLighting: () => setState(() {
                       ev = 0.0;
                       gamma = 1.0;
+                      hdr = false;
                     }),
-                    onApplyLightingPreset: (nextEv, nextGamma) => setState(() {
+                    onApplyLightingPreset: (nextEv, nextGamma, nextHdr) =>
+                        setState(() {
                       ev = nextEv;
                       gamma = nextGamma;
+                      hdr = nextHdr;
                     }),
                   ),
                 ),
@@ -749,40 +779,49 @@ void main() {
 
         // Collapsed by default.
         expect(find.text('Glare'), findsNothing);
-        expect(find.byTooltip('Adjust exposure & gamma'), findsOneWidget);
+        expect(find.byTooltip('Adjust exposure, gamma & HDR'), findsOneWidget);
 
         // Expand lighting controls.
-        await tester.tap(find.byTooltip('Adjust exposure & gamma'));
+        await tester.tap(find.byTooltip('Adjust exposure, gamma & HDR'));
         await tester.pumpAndSettle();
 
         expect(find.text('Auto'), findsOneWidget);
         expect(find.text('Glare'), findsOneWidget);
         expect(find.text('Dark'), findsOneWidget);
+        expect(find.text('HDR'), findsOneWidget);
         expect(find.text('EV'), findsOneWidget);
         expect(find.text('Gamma'), findsOneWidget);
 
-        // Apply Glare preset.
+        // Toggle HDR independently.
+        await tester.tap(find.text('HDR'));
+        await tester.pump();
+        expect(hdr, isTrue);
+        expect(find.text('Reset'), findsOneWidget);
+
+        // Apply Glare preset (also activates HDR).
         await tester.tap(find.text('Glare'));
         await tester.pump();
         expect(ev, closeTo(-1.2, 0.01));
         expect(gamma, closeTo(0.75, 0.01));
+        expect(hdr, isTrue);
         expect(find.text('-1.2 EV'), findsOneWidget);
         expect(find.text('γ 0.75'), findsOneWidget);
-        expect(find.text('Reset'), findsOneWidget);
 
-        // Apply Dark preset.
+        // Apply Dark preset (also activates HDR).
         await tester.tap(find.text('Dark'));
         await tester.pump();
         expect(ev, closeTo(1.2, 0.01));
         expect(gamma, closeTo(1.45, 0.01));
+        expect(hdr, isTrue);
         expect(find.text('+1.2 EV'), findsOneWidget);
         expect(find.text('γ 1.45'), findsOneWidget);
 
-        // Reset back to neutral.
+        // Reset back to neutral (EV 0, Gamma 1.0, HDR off).
         await tester.tap(find.text('Reset'));
         await tester.pump();
         expect(ev, 0.0);
         expect(gamma, 1.0);
+        expect(hdr, isFalse);
       },
     );
   });
