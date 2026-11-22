@@ -21,6 +21,9 @@ import 'package:vinkit_app/services/vin_validator.dart';
 import 'package:vinkit_app/theme/app_theme.dart';
 import 'package:vinkit_app/widgets/camera_permission_view.dart';
 import 'package:vinkit_app/widgets/manual_vin_sheet.dart';
+import 'package:vinkit_app/widgets/scanner_controls.dart';
+import 'package:vinkit_app/widgets/scanner_overlay.dart';
+import 'package:vinkit_app/widgets/startup_splash_overlay.dart';
 
 class _FakeFeedbackService implements ScannerFeedbackService {
   int playCount = 0;
@@ -662,5 +665,152 @@ void main() {
         expect(find.text('VO-115'), findsOneWidget);
       },
     );
+  });
+
+  group('StartupSplashOverlay', () {
+    testWidgets('renders branded VinKit splash and invokes onFinished after animation', (tester) async {
+      var finished = false;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.darkTheme,
+          home: Scaffold(
+            body: StartupSplashOverlay(
+              duration: const Duration(milliseconds: 300),
+              onFinished: () => finished = true,
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('VinKit'), findsOneWidget);
+      expect(finished, isFalse);
+
+      await tester.pumpAndSettle();
+      expect(finished, isTrue);
+    });
+  });
+
+  group('ScannerControls Exposure & Gamma HUD', () {
+    testWidgets(
+      'expands lighting controls, applies Glare/Dark/Auto presets, and fits narrow screens',
+      (tester) async {
+        tester.view.physicalSize = const Size(360, 740);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        var isExpanded = false;
+        var ev = 0.0;
+        var gamma = 1.0;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.darkTheme,
+            home: Scaffold(
+              backgroundColor: Colors.black,
+              body: StatefulBuilder(
+                builder: (context, setState) => Align(
+                  alignment: Alignment.bottomCenter,
+                  child: ScannerControls(
+                    zoomScale: 0.0,
+                    torchState: TorchState.off,
+                    isCameraRunning: true,
+                    onZoomChanged: (_) {},
+                    onToggleTorch: () {},
+                    onManualEntryTap: () {},
+                    primaryActionLabel: 'Read VIN (OCR)',
+                    onPrimaryActionTap: () {},
+                    showLightingControls: true,
+                    isLightingExpanded: isExpanded,
+                    onToggleLightingPanel: () =>
+                        setState(() => isExpanded = !isExpanded),
+                    supportsExposureOffset: true,
+                    exposureOffset: ev,
+                    minExposureOffset: -2.0,
+                    maxExposureOffset: 2.0,
+                    onExposureChanged: (next) => setState(() => ev = next),
+                    gamma: gamma,
+                    onGammaChanged: (next) => setState(() => gamma = next),
+                    onResetLighting: () => setState(() {
+                      ev = 0.0;
+                      gamma = 1.0;
+                    }),
+                    onApplyLightingPreset: (nextEv, nextGamma) => setState(() {
+                      ev = nextEv;
+                      gamma = nextGamma;
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        // Collapsed by default.
+        expect(find.text('Glare'), findsNothing);
+        expect(find.byTooltip('Adjust exposure & gamma'), findsOneWidget);
+
+        // Expand lighting controls.
+        await tester.tap(find.byTooltip('Adjust exposure & gamma'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Auto'), findsOneWidget);
+        expect(find.text('Glare'), findsOneWidget);
+        expect(find.text('Dark'), findsOneWidget);
+        expect(find.text('EV'), findsOneWidget);
+        expect(find.text('Gamma'), findsOneWidget);
+
+        // Apply Glare preset.
+        await tester.tap(find.text('Glare'));
+        await tester.pump();
+        expect(ev, closeTo(-1.2, 0.01));
+        expect(gamma, closeTo(0.75, 0.01));
+        expect(find.text('-1.2 EV'), findsOneWidget);
+        expect(find.text('γ 0.75'), findsOneWidget);
+        expect(find.text('Reset'), findsOneWidget);
+
+        // Apply Dark preset.
+        await tester.tap(find.text('Dark'));
+        await tester.pump();
+        expect(ev, closeTo(1.2, 0.01));
+        expect(gamma, closeTo(1.45, 0.01));
+        expect(find.text('+1.2 EV'), findsOneWidget);
+        expect(find.text('γ 1.45'), findsOneWidget);
+
+        // Reset back to neutral.
+        await tester.tap(find.text('Reset'));
+        await tester.pump();
+        expect(ev, 0.0);
+        expect(gamma, 1.0);
+      },
+    );
+  });
+
+  group('ScannerOverlay partial OCR action', () {
+    testWidgets('displays partial VIN banner with working Edit action button', (tester) async {
+      var editTapped = false;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.darkTheme,
+          home: Scaffold(
+            backgroundColor: Colors.black,
+            body: ScannerOverlay(
+              scanWindow: const Rect.fromLTWH(24, 200, 320, 104),
+              isPaused: false,
+              showScanLine: false,
+              statusMessage: 'Partial read: 5NPD84LF0KH4123',
+              statusActionLabel: 'Edit',
+              onStatusAction: () => editTapped = true,
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('Partial read: 5NPD84LF0KH4123'), findsOneWidget);
+      await tester.tap(find.text('Edit'));
+      expect(editTapped, isTrue);
+    });
   });
 }

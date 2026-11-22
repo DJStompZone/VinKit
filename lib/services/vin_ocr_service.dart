@@ -65,7 +65,16 @@ class VinOcrResult {
       return const <String>[];
     }
 
-    final hasGeometry = nonEmpty.any((block) => block.boundingBox != Rect.zero);
+    bool hasValidBox(Rect rect) =>
+        rect != Rect.zero &&
+        rect.left.isFinite &&
+        rect.top.isFinite &&
+        rect.right.isFinite &&
+        rect.bottom.isFinite &&
+        rect.width >= 0 &&
+        rect.height >= 0;
+
+    final hasGeometry = nonEmpty.every((block) => hasValidBox(block.boundingBox));
     final lines = <String>[];
     final seen = <String>{};
 

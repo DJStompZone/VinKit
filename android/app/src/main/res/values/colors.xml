@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="vinkit_splash_background">#121016</color>
+    <color name="vinkit_brand_amber">#FF9700</color>
+    <color name="vinkit_brand_coral">#F05D72</color>
+    <color name="vinkit_brand_magenta">#CD3DE8</color>
+</resources>

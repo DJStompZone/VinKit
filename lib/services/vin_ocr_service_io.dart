@@ -105,6 +105,17 @@ class MobileVinOcrService implements VinOcrService {
         error.message?.toString() ?? 'Captured image file could not be read.',
         code: 'INVALID_IMAGE',
       );
+    } on PlatformException catch (error) {
+      throw VinOcrException(
+        error.message ?? 'On-device OCR failed while reading the image.',
+        code: error.code,
+      );
+    } catch (error) {
+      debugPrint('Unexpected OCR recognition error: $error');
+      throw const VinOcrException(
+        'OCR could not process this capture. Try steadier framing or adjusting lighting.',
+        code: 'UNEXPECTED_ERROR',
+      );
     }
   }
 

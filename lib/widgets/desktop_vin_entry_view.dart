@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:vinkit_app/services/vin_validator.dart';
+import 'package:vinkit_app/theme/app_theme.dart';
 
 /// Full-screen desktop VIN lookup view shown on platforms where live camera
 /// barcode scanning is unavailable (such as Windows and Linux).
@@ -133,12 +134,22 @@ class _DesktopVinEntryViewState extends State<DesktopVinEntryView> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Row(
+        title: Row(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Icon(Icons.qr_code_scanner_rounded, size: 22),
-            SizedBox(width: 8),
-            Text(
+            ClipRRect(
+              borderRadius: BorderRadius.circular(7),
+              child: Image.asset(
+                'assets/images/vinkit_icon.png',
+                width: 26,
+                height: 26,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) =>
+                    const Icon(Icons.qr_code_scanner_rounded, size: 22),
+              ),
+            ),
+            const SizedBox(width: 10),
+            const Text(
               'VinKit',
               style: TextStyle(fontWeight: FontWeight.w800),
             ),
@@ -159,48 +170,78 @@ class _DesktopVinEntryViewState extends State<DesktopVinEntryView> {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 520),
             child: Card(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    Row(
-                      children: <Widget>[
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: colorScheme.primaryContainer,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Icon(
-                            Icons.directions_car_filled_rounded,
-                            color: colorScheme.onPrimaryContainer,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              Text(
-                                'VIN Spec Lookup',
-                                style: theme.textTheme.titleLarge?.copyWith(
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'Type, paste, or scan with a USB barcode scanner',
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
+              clipBehavior: Clip.antiAlias,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Container(
+                    height: 4,
+                    decoration: const BoxDecoration(
+                      gradient: AppTheme.brandGradient,
                     ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        Row(
+                          children: <Widget>[
+                            Container(
+                              width: 46,
+                              height: 46,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(13),
+                                boxShadow: <BoxShadow>[
+                                  BoxShadow(
+                                    color: AppTheme.brandCoral
+                                        .withValues(alpha: 0.28),
+                                    blurRadius: 14,
+                                    offset: const Offset(0, 4),
+                                  ),
+                                ],
+                              ),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(13),
+                                child: Image.asset(
+                                  'assets/images/vinkit_icon.png',
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, _, _) => Container(
+                                    color: colorScheme.primaryContainer,
+                                    alignment: Alignment.center,
+                                    child: Icon(
+                                      Icons.directions_car_filled_rounded,
+                                      color: colorScheme.onPrimaryContainer,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: <Widget>[
+                                  Text(
+                                    'VIN Spec Lookup',
+                                    style: theme.textTheme.titleLarge?.copyWith(
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    'Type, paste, or scan with a USB barcode scanner',
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color: colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
                     if (widget.onStrictnessChanged != null) ...<Widget>[
                       const SizedBox(height: 16),
                       Wrap(
@@ -346,7 +387,9 @@ class _DesktopVinEntryViewState extends State<DesktopVinEntryView> {
                       ),
                     ),
                   ],
-                ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),

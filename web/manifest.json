@@ -1,14 +1,19 @@
 {
-    "name": "vinkit_app",
-    "short_name": "vinkit_app",
+    "name": "VinKit",
+    "short_name": "VinKit",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#121016",
+    "theme_color": "#F05D72",
+    "description": "Automotive VIN barcode & OCR scanner and instant vehicle specification lookup.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
+        {
+            "src": "favicon.ico",
+            "sizes": "16x16 32x32",
+            "type": "image/x-icon"
+        },
         {
             "src": "icons/Icon-192.png",
             "sizes": "192x192",

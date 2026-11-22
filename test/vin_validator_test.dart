@@ -1,6 +1,7 @@
 import 'dart:ui';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:vinkit_app/services/ocr_image_preprocessor.dart';
 import 'package:vinkit_app/services/vin_ocr_service.dart';
 import 'package:vinkit_app/services/vin_validator.dart';
 
@@ -274,6 +275,81 @@ void main() {
 
       final extraction = validator.extractFromOcrText(result.orderedLines);
       expect(extraction.vin, '1FM5K8GCXNGA77516');
+    });
+
+    test('safely ignores non-finite and negative bounding boxes without crashing', () {
+      const result = VinOcrResult(
+        blocks: <VinOcrTextBlock>[
+          VinOcrTextBlock(
+            text: 'GARBAGE',
+            confidence: 0.5,
+            boundingBox: Rect.fromLTWH(double.nan, double.infinity, 20, 10),
+          ),
+          VinOcrTextBlock(
+            text: 'PARTIAL1234',
+            confidence: 0.6,
+            boundingBox: Rect.fromLTWH(-10, 5, -5, 12),
+          ),
+          VinOcrTextBlock(
+            text: '1FM5K8GCXNGA77516',
+            confidence: 0.9,
+          ),
+        ],
+      );
+
+      final lines = result.orderedLines;
+      expect(lines, isNotEmpty);
+      expect(validator.extractFromOcrText(lines).vin, '1FM5K8GCXNGA77516');
+    });
+  });
+
+  group('VinValidator.extractFromOcrText crash resilience', () {
+    test('handles empty, CJK, symbol-heavy, and very long noisy OCR lines safely', () {
+      final noisyInputs = <List<String>>[
+        const <String>[],
+        const <String>['', '   ', '\n\t'],
+        const <String>['日本語テスト!!!', '###---@@@***', '你好世界 123'],
+        <String>[List<String>.filled(40, 'NOISE_TOKEN!@# ').join()],
+        const <String>['TIRE PRESSURE 35 PSI', 'FRONT 240 KPA', 'REAR 240 KPA'],
+      ];
+
+      for (final lines in noisyInputs) {
+        final normal = validator.extractFromOcrText(
+          lines,
+          strictness: VinScanStrictness.normal,
+        );
+        final strict = validator.extractFromOcrText(
+          lines,
+          strictness: VinScanStrictness.strict,
+        );
+        expect(normal.vin, isNull);
+        expect(strict.vin, isNull);
+      }
+    });
+  });
+
+  group('OcrImagePreprocessor.buildPreviewGammaMatrix', () {
+    test('returns identity matrix for neutral gamma 1.0', () {
+      final matrix = OcrImagePreprocessor.buildPreviewGammaMatrix(1.0);
+      expect(matrix, hasLength(20));
+      expect(matrix[0], 1.0);
+      expect(matrix[4], 0.0);
+      expect(matrix[6], 1.0);
+      expect(matrix[12], 1.0);
+      expect(matrix[18], 1.0);
+    });
+
+    test('lifts midtones for shadow gamma > 1.0 and darkens midtones for glare gamma < 1.0', () {
+      final shadowMatrix = OcrImagePreprocessor.buildPreviewGammaMatrix(1.45);
+      final glareMatrix = OcrImagePreprocessor.buildPreviewGammaMatrix(0.70);
+
+      final shadowMid = (shadowMatrix[0] * 127.5 + shadowMatrix[4]).clamp(0, 255);
+      final glareMid = (glareMatrix[0] * 127.5 + glareMatrix[4]).clamp(0, 255);
+
+      expect(shadowMatrix[4], greaterThan(0.0));
+      expect(shadowMid, greaterThan(127.5));
+      expect(glareMatrix[4], lessThan(0.0));
+      expect(glareMid, lessThan(127.5));
     });
   });
 }

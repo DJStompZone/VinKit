@@ -10,11 +10,12 @@ A production-ready multiplatform Flutter application (Android, iOS, Web, and Win
   - **Strict:** Enforces exact 17-character VIN matching (stripping only whitespace/hyphens, Code 39 `*` sentinels, and legacy 18-character leading `I`) with no fuzzy substitutions. If a barcode fails Strict mode due to extra characters, VinKit offers a one-tap **Use Normal** shortcut right in the scanner banner.
 - **On-Device Plaintext VIN OCR Mode (`Barcode` / `OCR`):**
   - Powered by `mobile_ocr` using **ONNX Runtime Mobile (PaddleOCR v5)** on Android (models ~20 MB downloaded once on first use and cached locally with SHA-256 verification) and **Apple Vision** on iOS.
+  - Includes native viewfinder ROI cropping & resolution capping (`zone.stomp.vinkit/ocr_image_prep`) so cluttered scenes never exhaust memory, plus collapsible **Exposure (EV) & Gamma** controls (`Auto`, `Glare`, `Dark` presets + fine sliders with live gamma preview) for harsh windshield glare or shadowed door jambs.
   - Designed for vehicles where the VIN is printed in plaintext on the windshield or door jamb without a barcode. Includes tap-to-focus, zoom presets/slider, flashlight toggle, and one-tap **Edit** prefill into manual entry if glare causes a partial read.
-- **Instant Scan Lock & Confirmation Beep:** The instant a valid 17-character VIN is detected (via barcode or OCR), VinKit plays a crisp native scanner beep + haptic pulse, stops the scanner immediately, and opens the full-screen Vehicle Spec Sheet.
+- **Instant Scan Lock & Confirmation Beep:** The instant a valid 17-character VIN is detected (via barcode or OCR), VinKit plays a crisp 3.4 kHz square-wave scanner beep + haptic pulse, stops the scanner immediately, and opens the full-screen Vehicle Spec Sheet.
 - **High-Density Full-Screen Vehicle Spec Sheet:** Queries `https://vin.stomp.zone/api/v1/vin/{VIN}` via `dio` and immediately displays Year, Make, Model, Trim, Engine, VIN, Recommended Oil viscosity/capacity, Filters, and Wiper Blade sizes/connectors above the fold, followed by Battery specs, all oil options, fluid services with copyable product codes, powertrain/catalog match details, and one-tap **Copy All Specs**.
 - **Web & Desktop Support:** Web runs live camera scanning with Web Audio API beep feedback; Windows/Linux desktop uses `DesktopVinEntryView` with full keyboard, clipboard, and USB barcode scanner support (including `Normal`/`Strict` strictness).
-- **Material 3 Light & Dark Themes:** Full `useMaterial3: true` support with system default and an in-app theme toggle.
+- **Branded Sunset Theme & Animated Splash:** Custom VinKit app icons across Android (adaptive + monochrome + Android 12+ splash), iOS, Web, and Windows, paired with a sunset amber-to-magenta Material 3 palette and an animated VIN scanline startup splash.
 
 ## Project Structure
 
@@ -36,7 +37,8 @@ lib/
 │   ├── scanner_screen.dart           # Barcode/OCR scanner, Normal/Strict toggle, instant beep/stop
 │   └── vehicle_result_screen.dart    # Full-screen high-density vehicle spec sheet
 ├── services/
-│   ├── scanner_feedback_service.dart # Native/Web scanner beep & haptic confirmation service
+│   ├── ocr_image_preprocessor.dart   # Native ROI crop & gamma preprocessing + preview LUT matrix
+│   ├── scanner_feedback_service.dart # Native/Web 3.4 kHz scanner beep & haptic feedback service
 │   ├── stomp_zone_vin_service.dart   # Dio-backed vin.stomp.zone API service
 │   ├── vin_lookup_controller.dart    # ChangeNotifier coordinating validation & lookups
 │   ├── vin_lookup_service.dart       # Abstract interface for swapping VIN backends
@@ -45,14 +47,15 @@ lib/
 │   ├── vin_ocr_service_stub.dart     # Web/Wasm stub for OCR service
 │   └── vin_validator.dart            # Strict/Normal barcode extraction, ISO 3779 check digit, OCR extraction
 ├── theme/
-│   └── app_theme.dart                # Material 3 light and dark theme definitions
+│   └── app_theme.dart                # Sunset amber-coral-magenta Material 3 light & dark themes
 └── widgets/
     ├── camera_permission_view.dart   # Camera denial/error UI with Settings shortcut
     ├── desktop_vin_entry_view.dart   # Windows/Linux desktop keyboard & USB scanner view
     ├── manual_vin_sheet.dart         # Manual VIN entry & clipboard paste modal sheet
-    ├── ocr_camera_view.dart          # Live camera capture view for PaddleOCR v5 ONNX OCR
-    ├── scanner_controls.dart         # Zoom slider, 1x/2x presets, torch, OCR/manual triggers
-    └── scanner_overlay.dart          # CustomPainter horizontal cutout mask & action banner
+    ├── ocr_camera_view.dart          # Live camera capture view with Exposure/Gamma & PaddleOCR v5
+    ├── scanner_controls.dart         # Zoom, torch, collapsible EV/Gamma lighting, OCR/manual triggers
+    ├── scanner_overlay.dart          # CustomPainter horizontal cutout mask, gradient scanline & banner
+    └── startup_splash_overlay.dart   # Animated branded VIN scanline startup splash overlay
 ```
 
 ## Swapping the VIN Backend

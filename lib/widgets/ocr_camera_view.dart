@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:mobile_scanner/mobile_scanner.dart' show TorchState;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:vinkit_app/services/ocr_image_preprocessor.dart';
 import 'package:vinkit_app/services/vin_ocr_service.dart';
 import 'package:vinkit_app/services/vin_validator.dart';
 import 'package:vinkit_app/widgets/scanner_controls.dart';
@@ -24,6 +26,7 @@ class OcrCameraView extends StatefulWidget {
     required this.onVinRecognized,
     required this.onManualEntryTap,
     this.onSwitchStrictnessToNormal,
+    this.preprocessor = const OcrImagePreprocessor(),
   });
 
   /// On-device OCR engine (PaddleOCR v5 ONNX Runtime / Apple Vision).
@@ -52,6 +55,10 @@ class OcrCameraView extends StatefulWidget {
   /// detects a candidate that only matches under Normal mode.
   final VoidCallback? onSwitchStrictnessToNormal;
 
+  /// Native image preprocessor cropping to the viewfinder ROI and applying
+  /// user-selected gamma correction before OCR inference.
+  final OcrImagePreprocessor preprocessor;
+
   @override
   State<OcrCameraView> createState() => _OcrCameraViewState();
 }
@@ -61,6 +68,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
   CameraController? _cameraController;
   List<CameraDescription> _cameras = const <CameraDescription>[];
   int _selectedCameraIndex = 0;
+  int _cameraGeneration = 0;
 
   bool _isInitializingCamera = true;
   String? _cameraError;
@@ -75,6 +83,16 @@ class _OcrCameraViewState extends State<OcrCameraView>
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
   bool _isTorchOn = false;
+
+  bool _supportsExposureOffset = false;
+  double _minExposureOffset = -2.0;
+  double _maxExposureOffset = 2.0;
+  double _exposureStepSize = 0.0;
+  double _exposureOffset = 0.0;
+  double _gamma = 1.0;
+  bool _isLightingPanelExpanded = false;
+
+  Size? _lastViewportSize;
 
   String? _statusMessage;
   bool _statusIsError = false;
@@ -98,7 +116,9 @@ class _OcrCameraViewState extends State<OcrCameraView>
     }
     if (oldWidget.isPaused != widget.isPaused) {
       if (widget.isPaused) {
-        unawaited(_pausePreviewSafely(controller));
+        if (!_isProcessingOcr) {
+          unawaited(_pausePreviewSafely(controller));
+        }
       } else {
         unawaited(_resumePreviewSafely(controller));
       }
@@ -106,6 +126,9 @@ class _OcrCameraViewState extends State<OcrCameraView>
   }
 
   Future<void> _pausePreviewSafely(CameraController controller) async {
+    if (_cameraController != controller || !controller.value.isInitialized) {
+      return;
+    }
     try {
       await controller.pausePreview();
     } catch (_) {
@@ -114,6 +137,9 @@ class _OcrCameraViewState extends State<OcrCameraView>
   }
 
   Future<void> _resumePreviewSafely(CameraController controller) async {
+    if (_cameraController != controller || !controller.value.isInitialized) {
+      return;
+    }
     try {
       await controller.resumePreview();
     } catch (_) {
@@ -123,14 +149,14 @@ class _OcrCameraViewState extends State<OcrCameraView>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final controller = _cameraController;
-    if (controller == null || !controller.value.isInitialized) {
-      return;
-    }
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
-      unawaited(_disposeCamera());
-    } else if (state == AppLifecycleState.resumed && !widget.isPaused) {
+      if (_cameraController != null) {
+        unawaited(_disposeCamera());
+      }
+    } else if (state == AppLifecycleState.resumed &&
+        !widget.isPaused &&
+        _cameraController == null) {
       unawaited(_initializeCamera());
     }
   }
@@ -204,17 +230,21 @@ class _OcrCameraViewState extends State<OcrCameraView>
     if (!mounted) {
       return;
     }
+    final generation = ++_cameraGeneration;
     setState(() {
       _isInitializingCamera = true;
       _cameraError = null;
       _isPermissionDenied = false;
     });
 
-    await _disposeCamera();
+    await _disposeCamera(bumpGeneration: false);
+    if (!mounted || generation != _cameraGeneration) {
+      return;
+    }
 
     try {
       final cameras = await availableCameras();
-      if (!mounted) {
+      if (!mounted || generation != _cameraGeneration) {
         return;
       }
       if (cameras.isEmpty) {
@@ -247,7 +277,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
       );
 
       await controller.initialize();
-      if (!mounted) {
+      if (!mounted || generation != _cameraGeneration) {
         await controller.dispose();
         return;
       }
@@ -256,6 +286,11 @@ class _OcrCameraViewState extends State<OcrCameraView>
         await controller.setFocusMode(FocusMode.auto);
       } catch (_) {
         // Focus mode selection may not be supported on all cameras.
+      }
+      try {
+        await controller.setExposureMode(ExposureMode.auto);
+      } catch (_) {
+        // Exposure mode selection may not be supported on all cameras.
       }
 
       double minZoom = 1.0;
@@ -267,9 +302,44 @@ class _OcrCameraViewState extends State<OcrCameraView>
         // Leave default 1.0..1.0 if zoom query fails.
       }
 
-      if (!mounted) {
+      var supportsExposure = false;
+      var minEv = -2.0;
+      var maxEv = 2.0;
+      var evStep = 0.0;
+      try {
+        final rawMinEv = await controller.getMinExposureOffset();
+        final rawMaxEv = await controller.getMaxExposureOffset();
+        final rawStep = await controller.getExposureOffsetStepSize();
+        if (rawMinEv.isFinite &&
+            rawMaxEv.isFinite &&
+            rawMaxEv > rawMinEv + 0.05) {
+          final clampedMin = rawMinEv.clamp(-4.0, 0.0);
+          final clampedMax = rawMaxEv.clamp(0.0, 4.0);
+          if (clampedMax > clampedMin + 0.05) {
+            supportsExposure = true;
+            minEv = clampedMin;
+            maxEv = clampedMax;
+            evStep = rawStep.isFinite && rawStep > 0.0 ? rawStep : 0.0;
+          }
+        }
+      } catch (_) {
+        // Exposure offset queries may not be supported on all cameras.
+      }
+
+      if (!mounted || generation != _cameraGeneration) {
         await controller.dispose();
         return;
+      }
+
+      final restoredEv = supportsExposure
+          ? _exposureOffset.clamp(minEv, maxEv)
+          : 0.0;
+      if (supportsExposure && restoredEv.abs() >= 0.05) {
+        try {
+          await controller.setExposureOffset(restoredEv);
+        } catch (_) {
+          // Ignore if restoring exposure offset fails.
+        }
       }
 
       setState(() {
@@ -278,10 +348,15 @@ class _OcrCameraViewState extends State<OcrCameraView>
         _maxZoom = maxZoom;
         _zoomScale = 0.0;
         _isTorchOn = false;
+        _supportsExposureOffset = supportsExposure;
+        _minExposureOffset = minEv;
+        _maxExposureOffset = maxEv;
+        _exposureStepSize = evStep;
+        _exposureOffset = restoredEv;
         _isInitializingCamera = false;
       });
     } on CameraException catch (error) {
-      if (!mounted) {
+      if (!mounted || generation != _cameraGeneration) {
         return;
       }
       final denied = error.code.toLowerCase().contains('access') ||
@@ -294,7 +369,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
             : (error.description ?? 'Unable to start OCR camera preview.');
       });
     } catch (_) {
-      if (!mounted) {
+      if (!mounted || generation != _cameraGeneration) {
         return;
       }
       setState(() {
@@ -304,7 +379,10 @@ class _OcrCameraViewState extends State<OcrCameraView>
     }
   }
 
-  Future<void> _disposeCamera() async {
+  Future<void> _disposeCamera({bool bumpGeneration = true}) async {
+    if (bumpGeneration) {
+      _cameraGeneration++;
+    }
     final controller = _cameraController;
     _cameraController = null;
     if (controller == null) {
@@ -352,6 +430,41 @@ class _OcrCameraViewState extends State<OcrCameraView>
     }
   }
 
+  Future<void> _setExposureOffset(double value) async {
+    if (!_supportsExposureOffset) {
+      return;
+    }
+    var target = value.clamp(_minExposureOffset, _maxExposureOffset);
+    if (_exposureStepSize > 0.0) {
+      target = (target / _exposureStepSize).round() * _exposureStepSize;
+      target = target.clamp(_minExposureOffset, _maxExposureOffset);
+    }
+    setState(() => _exposureOffset = target);
+
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
+    try {
+      await controller.setExposureOffset(target);
+    } catch (_) {
+      // Ignore transient hardware exposure errors.
+    }
+  }
+
+  void _setGamma(double value) {
+    setState(() => _gamma = value.clamp(0.45, 2.0));
+  }
+
+  Future<void> _applyLightingPreset(double ev, double gamma) async {
+    setState(() => _gamma = gamma.clamp(0.45, 2.0));
+    if (_supportsExposureOffset) {
+      await _setExposureOffset(ev);
+    }
+  }
+
+  Future<void> _resetLighting() => _applyLightingPreset(0.0, 1.0);
+
   Future<void> _toggleTorch() async {
     final controller = _cameraController;
     if (controller == null || !controller.value.isInitialized) {
@@ -393,10 +506,33 @@ class _OcrCameraViewState extends State<OcrCameraView>
     }
   }
 
+  Rect? _computeNormalizedCropRect(Size viewportSize) {
+    final width = viewportSize.width;
+    final height = viewportSize.height;
+    if (width <= 0 || height <= 0) {
+      return null;
+    }
+    // Crop generously around the horizontal viewfinder reticle so off-center
+    // VIN plates are kept while trimming cluttered dashboard/windshield edges.
+    final padX = math.max(widget.scanWindow.width * 0.05, 16.0) / width;
+    final padY = math.max(widget.scanWindow.height * 0.90, 80.0) / height;
+
+    final left = ((widget.scanWindow.left / width) - padX).clamp(0.0, 0.35);
+    final right = ((widget.scanWindow.right / width) + padX).clamp(0.65, 1.0);
+    final top = ((widget.scanWindow.top / height) - padY).clamp(0.0, 0.72);
+    final bottom = ((widget.scanWindow.bottom / height) + padY).clamp(0.28, 1.0);
+
+    if (right - left < 0.25 || bottom - top < 0.14) {
+      return null;
+    }
+    return Rect.fromLTRB(left, top, right, bottom);
+  }
+
   Future<void> _captureAndRecognize() async {
     final controller = _cameraController;
     if (controller == null ||
         !controller.value.isInitialized ||
+        controller.value.isTakingPicture ||
         _isProcessingOcr ||
         widget.isPaused) {
       return;
@@ -409,19 +545,31 @@ class _OcrCameraViewState extends State<OcrCameraView>
       }
     }
 
+    final viewportSize = _lastViewportSize ?? MediaQuery.sizeOf(context);
+    final cropRect = _computeNormalizedCropRect(viewportSize);
+    final activeGamma = _gamma;
+
     setState(() {
       _isProcessingOcr = true;
-      _statusMessage = 'Running on-device PaddleOCR v5...';
+      _statusMessage = 'Looking for text...';
       _statusIsError = false;
       _statusActionLabel = null;
       _statusAction = null;
     });
 
-    String? imagePath;
+    String? rawImagePath;
+    PreparedOcrImage? preparedImage;
     try {
       final photo = await controller.takePicture();
-      imagePath = photo.path;
-      final ocrResult = await widget.ocrService.recognizeText(imagePath);
+      rawImagePath = photo.path;
+      preparedImage = await widget.preprocessor.prepareForOcr(
+        imagePath: rawImagePath,
+        gamma: activeGamma,
+        cropRect: cropRect,
+      );
+      final ocrResult = await widget.ocrService.recognizeText(
+        preparedImage.path,
+      );
       if (!mounted) {
         return;
       }
@@ -467,6 +615,8 @@ class _OcrCameraViewState extends State<OcrCameraView>
       }
 
       final snippet = extraction.bestSnippet;
+      final isNeutralLighting =
+          _exposureOffset.abs() < 0.05 && (_gamma - 1.0).abs() < 0.05;
       setState(() {
         _isProcessingOcr = false;
         _statusIsError = true;
@@ -475,9 +625,20 @@ class _OcrCameraViewState extends State<OcrCameraView>
           _statusActionLabel = 'Edit';
           _statusAction = () => widget.onManualEntryTap(snippet);
         } else if (lines.isEmpty) {
-          _statusMessage = 'No text detected — hold steady and improve lighting';
-          _statusActionLabel = null;
-          _statusAction = null;
+          if (isNeutralLighting) {
+            _statusMessage = 'No text detected — try adjusting Exposure/Gamma';
+            _statusActionLabel = 'Lighting';
+            _statusAction = () {
+              if (mounted) {
+                setState(() => _isLightingPanelExpanded = true);
+              }
+            };
+          } else {
+            _statusMessage =
+                'No text detected — hold steady or try another preset';
+            _statusActionLabel = 'Manual';
+            _statusAction = () => widget.onManualEntryTap(null);
+          }
         } else {
           _statusMessage = 'No valid 17-character VIN found in frame';
           _statusActionLabel = 'Manual';
@@ -519,8 +680,17 @@ class _OcrCameraViewState extends State<OcrCameraView>
         _statusAction = null;
       });
     } finally {
-      if (imagePath != null) {
-        unawaited(widget.ocrService.deleteTempImage(imagePath));
+      if (rawImagePath != null) {
+        unawaited(widget.ocrService.deleteTempImage(rawImagePath));
+      }
+      if (preparedImage != null && preparedImage.isTemporaryCopy) {
+        unawaited(widget.ocrService.deleteTempImage(preparedImage.path));
+      }
+      if (mounted && widget.isPaused) {
+        final activeController = _cameraController;
+        if (activeController != null && activeController.value.isInitialized) {
+          unawaited(_pausePreviewSafely(activeController));
+        }
       }
     }
   }
@@ -539,6 +709,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
     final isReady = controller != null && controller.value.isInitialized;
     final strictnessLabel =
         widget.strictness == VinScanStrictness.normal ? 'Normal' : 'Strict';
+    final applyPreviewGamma = (_gamma - 1.0).abs() >= 0.02;
 
     if (_cameraError != null) {
       return ColoredBox(
@@ -621,10 +792,14 @@ class _OcrCameraViewState extends State<OcrCameraView>
         if (isReady)
           LayoutBuilder(
             builder: (context, constraints) {
+              _lastViewportSize = Size(
+                constraints.maxWidth,
+                constraints.maxHeight,
+              );
               final previewSize = controller.value.previewSize;
               final isPortrait =
                   MediaQuery.orientationOf(context) == Orientation.portrait;
-              final child = previewSize == null
+              final rawPreview = previewSize == null
                   ? CameraPreview(controller)
                   : FittedBox(
                       fit: BoxFit.cover,
@@ -639,11 +814,19 @@ class _OcrCameraViewState extends State<OcrCameraView>
                         child: CameraPreview(controller),
                       ),
                     );
+              final filteredPreview = applyPreviewGamma
+                  ? ColorFiltered(
+                      colorFilter: ColorFilter.matrix(
+                        OcrImagePreprocessor.buildPreviewGammaMatrix(_gamma),
+                      ),
+                      child: rawPreview,
+                    )
+                  : rawPreview;
               return GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTapUp: (details) =>
                     unawaited(_handleTapToFocus(details, constraints)),
-                child: child,
+                child: filteredPreview,
               );
             },
           )
@@ -698,6 +881,21 @@ class _OcrCameraViewState extends State<OcrCameraView>
             onPrimaryActionTap: isReady && !widget.isPaused
                 ? () => unawaited(_captureAndRecognize())
                 : null,
+            showLightingControls: true,
+            isLightingExpanded: _isLightingPanelExpanded,
+            onToggleLightingPanel: () => setState(
+              () => _isLightingPanelExpanded = !_isLightingPanelExpanded,
+            ),
+            supportsExposureOffset: _supportsExposureOffset,
+            exposureOffset: _exposureOffset,
+            minExposureOffset: _minExposureOffset,
+            maxExposureOffset: _maxExposureOffset,
+            onExposureChanged: (ev) => unawaited(_setExposureOffset(ev)),
+            gamma: _gamma,
+            onGammaChanged: _setGamma,
+            onResetLighting: () => unawaited(_resetLighting()),
+            onApplyLightingPreset: (ev, gamma) =>
+                unawaited(_applyLightingPreset(ev, gamma)),
           ),
         ),
       ],

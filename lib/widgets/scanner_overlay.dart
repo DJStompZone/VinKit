@@ -1,4 +1,5 @@
 import 'package:material_ui/material_ui.dart';
+import 'package:vinkit_app/theme/app_theme.dart';
 
 /// Renders a semi-transparent scanner mask with a horizontal VIN cutout,
 /// corner reticles, prompt pill, and optional status banner over the camera preview.
@@ -206,23 +207,39 @@ class ScannerOverlayPainter extends CustomPainter {
     canvas.drawPath(maskPath, maskPaint);
 
     final outlinePaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.35)
+      ..shader = AppTheme.brandGradient.createShader(scanWindow)
+      ..colorFilter = ColorFilter.mode(
+        Colors.white.withValues(alpha: showScanLine ? 0.65 : 0.42),
+        BlendMode.modulate,
+      )
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.25;
+      ..strokeWidth = 1.4;
     canvas.drawRRect(cutout, outlinePaint);
 
     if (showScanLine) {
-      final linePaint = Paint()
-        ..color = borderColor.withValues(alpha: 0.85)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.0
-        ..strokeCap = StrokeCap.round;
       final midY = scanWindow.center.dy;
-      canvas.drawLine(
-        Offset(scanWindow.left + 16, midY),
-        Offset(scanWindow.right - 16, midY),
-        linePaint,
+      final lineStart = Offset(scanWindow.left + 16, midY);
+      final lineEnd = Offset(scanWindow.right - 16, midY);
+      final lineRect = Rect.fromLTRB(
+        lineStart.dx,
+        midY - 2,
+        lineEnd.dx,
+        midY + 2,
       );
+      final glowPaint = Paint()
+        ..shader = AppTheme.brandGradient.createShader(lineRect)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 5.5
+        ..strokeCap = StrokeCap.round
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4.5);
+      canvas.drawLine(lineStart, lineEnd, glowPaint);
+
+      final linePaint = Paint()
+        ..shader = AppTheme.brandGradient.createShader(lineRect)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2
+        ..strokeCap = StrokeCap.round;
+      canvas.drawLine(lineStart, lineEnd, linePaint);
     }
 
     final bracketPaint = Paint()

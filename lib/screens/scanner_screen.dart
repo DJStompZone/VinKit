@@ -349,6 +349,8 @@ class _ScannerScreenState extends State<ScannerScreen>
     }
   }
 
+  static const Duration _beepTransitionLead = Duration(milliseconds: 55);
+
   void _triggerValidVinLock(String vin) {
     if (_isScanLocked || !mounted) {
       return;
@@ -356,12 +358,27 @@ class _ScannerScreenState extends State<ScannerScreen>
     // Lock synchronously before any async work to guarantee a single scan.
     _isScanLocked = true;
     _clearStatusMessage();
-    // Immediately BEEP + vibrate and halt the scanner on valid VIN lock.
-    unawaited(widget.feedbackService.playValidScanFeedback());
+    unawaited(_handleConfirmedScan(vin));
+  }
+
+  Future<void> _handleConfirmedScan(String vin) async {
+    // Start audible beep + haptic first so sound leads camera teardown and the
+    // screen transition, while kicking off the VIN API lookup in parallel.
+    final feedbackFuture = widget.feedbackService.playValidScanFeedback();
+    unawaited(widget.vinController.lookupVin(vin));
     if (_captureMode == ScannerCaptureMode.barcode) {
       unawaited(_stopScanning());
     }
-    unawaited(_openVehicleResultScreen(vin));
+    try {
+      await feedbackFuture;
+    } catch (_) {
+      // Never block navigation if audio/haptic playback fails.
+    }
+    await Future<void>.delayed(_beepTransitionLead);
+    if (!mounted) {
+      return;
+    }
+    await _openVehicleResultScreen(vin, startLookup: false);
   }
 
   void _onBarcodeDetected(BarcodeCapture capture) {
@@ -497,12 +514,17 @@ class _ScannerScreenState extends State<ScannerScreen>
     }
   }
 
-  Future<void> _openVehicleResultScreen(String vin) async {
+  Future<void> _openVehicleResultScreen(
+    String vin, {
+    bool startLookup = true,
+  }) async {
     if (!mounted) {
       return;
     }
     setState(() => _isScanLocked = true);
-    unawaited(widget.vinController.lookupVin(vin));
+    if (startLookup) {
+      unawaited(widget.vinController.lookupVin(vin));
+    }
 
     final closeAction = await Navigator.of(context).push<VehicleResultAction>(
       MaterialPageRoute<VehicleResultAction>(
@@ -570,10 +592,7 @@ class _ScannerScreenState extends State<ScannerScreen>
         onStrictnessChanged: _setStrictness,
         themeMode: widget.themeMode,
         onCycleThemeMode: widget.onCycleThemeMode,
-        onSubmitVin: (vin) {
-          unawaited(widget.feedbackService.playValidScanFeedback());
-          unawaited(_openVehicleResultScreen(vin));
-        },
+        onSubmitVin: _triggerValidVinLock,
       );
     }
 
@@ -676,26 +695,32 @@ class _ScannerScreenState extends State<ScannerScreen>
                       children: <Widget>[
                         DecoratedBox(
                           decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.66),
+                            color: Colors.black.withValues(alpha: 0.72),
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.16),
+                              color: Colors.white.withValues(alpha: 0.18),
                             ),
                           ),
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 14,
-                              vertical: 8,
-                            ),
+                            padding: const EdgeInsets.fromLTRB(8, 6, 14, 6),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: <Widget>[
-                                Icon(
-                                  isOcrMode
-                                      ? Icons.document_scanner_rounded
-                                      : Icons.qr_code_scanner_rounded,
-                                  size: 18,
-                                  color: Colors.white,
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(7),
+                                  child: Image.asset(
+                                    'assets/images/vinkit_icon.png',
+                                    width: 22,
+                                    height: 22,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, _, _) => Icon(
+                                      isOcrMode
+                                          ? Icons.document_scanner_rounded
+                                          : Icons.qr_code_scanner_rounded,
+                                      size: 18,
+                                      color: Colors.white,
+                                    ),
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
                                 const Text(
@@ -703,7 +728,8 @@ class _ScannerScreenState extends State<ScannerScreen>
                                   style: TextStyle(
                                     color: Colors.white,
                                     fontSize: 15,
-                                    fontWeight: FontWeight.w700,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 0.2,
                                   ),
                                 ),
                               ],
