@@ -1,6 +1,9 @@
 name: VinKit CI/CD
 
 on:
+  push:
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - master
@@ -22,7 +25,7 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.tag || '' }}
@@ -34,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -57,18 +60,26 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=2g -XX:ReservedCodeCacheSize=512m"
+      HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+      IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '') }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Require signing secrets for releases
+        if: env.IS_RELEASE == 'true' && env.HAS_KEYSTORE != 'true'
+        run: |
+          echo "::error::Release builds require the ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD secrets."
+          exit 1
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -79,16 +90,66 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Configure release signing
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_PATH="$RUNNER_TEMP/upload-keystore.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          {
+            printf 'storePassword=%s\n' "$KEYSTORE_PASSWORD"
+            printf 'keyPassword=%s\n' "$KEY_PASSWORD"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+            printf 'storeFile=%s\n' "$KEYSTORE_PATH"
+          } > android/key.properties
+
       - name: Build Android Release APK
         run: |
-          flutter build apk --release
-          cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/vinkit-android-release.apk
+          set -euo pipefail
+          flutter build apk --release \
+            --split-per-abi \
+            --obfuscate \
+            --split-debug-info=build/app/outputs/symbols \
+            --target-platform android-arm64
+
+          shopt -s nullglob
+          apks=(build/app/outputs/flutter-apk/*arm64-v8a-release.apk)
+          if [ "${#apks[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one arm64 release APK, found ${#apks[@]}"
+            ls -l build/app/outputs/flutter-apk/
+            exit 1
+          fi
+          cp "${apks[0]}" build/app/outputs/flutter-apk/vinkit-android-arm64-release.apk
+
+      - name: Verify APK is release-signed
+        if: env.HAS_KEYSTORE == 'true'
+        run: |
+          set -euo pipefail
+          APKSIGNER="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n1)"
+          CERTS="$("$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/vinkit-android-arm64-release.apk)"
+          echo "$CERTS"
+          if grep -qi "Android Debug" <<< "$CERTS"; then
+            echo "::error::APK is signed with the debug key, check the Gradle signingConfig"
+            exit 1
+          fi
 
       - name: Upload Android APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vinkit-android-apk
-          path: build/app/outputs/flutter-apk/vinkit-android-release.apk
+          path: build/app/outputs/flutter-apk/vinkit-android-arm64-release.apk
+          if-no-files-found: error
+
+      - name: Upload Dart debug symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-debug-symbols
+          path: build/app/outputs/symbols
           if-no-files-found: error
 
   build-web:
@@ -97,7 +158,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -114,7 +175,7 @@ jobs:
           cd build/web && zip -r ../vinkit-web-release.zip .
 
       - name: Upload Web Archive artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vinkit-web-release
           path: build/vinkit-web-release.zip
@@ -126,7 +187,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -147,7 +208,7 @@ jobs:
           Compress-Archive -Path "build/windows/x64/runner/Release/*" -DestinationPath "build/vinkit-windows-x64-release.zip" -Force
 
       - name: Upload Windows Archive artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vinkit-windows-x64
           path: build/vinkit-windows-x64-release.zip
@@ -159,11 +220,19 @@ jobs:
       - build-android
       - build-web
       - build-windows
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      checks: read
+      contents: write
+      id-token: write
+      statuses: read
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve release metadata
         id: meta
@@ -171,27 +240,81 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ -n "$INPUT_TAG" ]; then
-            RAW_TAG="$INPUT_TAG"
-          else
-            RAW_TAG="$REF_NAME"
+          set -euo pipefail
+          RAW_TAG="${INPUT_TAG:-$REF_NAME}"
+          VERSION="${RAW_TAG#v}"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version '$VERSION' derived from tag '$RAW_TAG'"
+            exit 1
           fi
-          if [[ "$RAW_TAG" != v* ]]; then
-            NORMALIZED_TAG="v$RAW_TAG"
-          else
-            NORMALIZED_TAG="$RAW_TAG"
+
+          {
+            echo "version=$VERSION"
+            echo "tag_name=v$VERSION"
+            echo "release_name=VinKit v$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches pubspec version
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          PUBSPEC_VERSION="$(sed -nE 's/^version:[[:space:]]*([^[:space:]#]+).*/\1/p' pubspec.yaml | head -n1)"
+          if [ -z "$PUBSPEC_VERSION" ]; then
+            echo "::error::Could not read version from pubspec.yaml"
+            exit 1
           fi
-          echo "tag_name=$NORMALIZED_TAG" >> "$GITHUB_OUTPUT"
-          echo "release_name=VinKit $NORMALIZED_TAG" >> "$GITHUB_OUTPUT"
+          if [ "${PUBSPEC_VERSION%%+*}" != "${VERSION%%+*}" ]; then
+            echo "::error::Tag version '$VERSION' does not match pubspec.yaml version '$PUBSPEC_VERSION'"
+            exit 1
+          fi
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
+          pattern: vinkit-*
           merge-multiple: true
 
+      - name: Apply versioned asset names
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          mv vinkit-android-arm64-release.apk  "vinkit-${VERSION}-android-arm64-release.apk"
+          mv vinkit-web-release.zip            "vinkit-${VERSION}-web-release.zip"
+          mv vinkit-windows-x64-release.zip    "vinkit-${VERSION}-windows-x64-release.zip"
+          ls -l
+
+      - name: Enforce filename conventions
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release-assets/*)
+          if [ "${#files[@]}" -ne 3 ]; then
+            echo "::error::Expected exactly 3 release assets, found ${#files[@]}"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            name="${f##*/}"
+            if [[ "$name" != "vinkit-${VERSION}-"* ]] || \
+               [[ ! "$name" =~ -(android-arm64|web|windows-x64)-release\.(apk|zip)$ ]]; then
+              echo "::error::Asset '$name' does not follow vinkit-${VERSION}-<platform>-release.<ext>"
+              exit 1
+            fi
+          done
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: 'release-assets/*'
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.meta.outputs.tag_name }}
           name: ${{ steps.meta.outputs.release_name }}
@@ -199,7 +322,8 @@ jobs:
           body: ${{ inputs.description }}
           prerelease: ${{ inputs.prerelease || false }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            release-assets/vinkit-android-release.apk
-            release-assets/vinkit-web-release.zip
-            release-assets/vinkit-windows-x64-release.zip
+            release-assets/vinkit-${{ steps.meta.outputs.version }}-android-arm64-release.apk
+            release-assets/vinkit-${{ steps.meta.outputs.version }}-web-release.zip
+            release-assets/vinkit-${{ steps.meta.outputs.version }}-windows-x64-release.zip
