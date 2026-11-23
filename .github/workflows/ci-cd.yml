@@ -1,8 +1,6 @@
 name: VinKit CI/CD
 
 on:
-    tags:
-      - 'v*'
   pull_request:
     branches:
       - master
