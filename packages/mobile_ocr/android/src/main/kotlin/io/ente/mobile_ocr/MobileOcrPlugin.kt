@@ -1,0 +1,733 @@
+package io.ente.mobile_ocr
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.util.Log
+import androidx.exifinterface.media.ExifInterface
+import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.MethodChannel.MethodCallHandler
+import io.flutter.plugin.common.MethodChannel.Result
+import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.io.File
+import java.io.FileOutputStream
+import java.security.MessageDigest
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+
+/** MobileOcrPlugin */
+class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
+  companion object {
+    private const val TAG = "MobileOcrPlugin"
+    private const val QUICK_DETECTION_MIN_SCORE = 0.9f
+    private const val FULL_OCR_MAX_DIMENSION = 4096
+    private const val FULL_OCR_MAX_PIXELS = 12_000_000L
+    private const val REGION_MAX_DIMENSION = 1280
+    private const val REGION_MAX_PIXELS = 2_000_000L
+    private const val DISPLAY_CACHE_MAX_ENTRIES = 32
+    private const val DISPLAY_CACHE_MAX_BYTES = 256L * 1024L * 1024L
+  }
+
+  private lateinit var channel : MethodChannel
+  private lateinit var context: Context
+  private var ocrProcessor: OcrProcessor? = null
+  private var textRegionDetector: TextRegionDetector? = null
+  private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+  private lateinit var modelManager: ModelManager
+  private var cachedModelFiles: ModelFiles? = null
+  private val modelMutex = Mutex()
+  private val processorMutex = Mutex()
+  private val regionDetectorMutex = Mutex()
+  private val displayableCacheMutex = Mutex()
+  private val displayableImageCache = LinkedHashMap<String, ImageCacheEntry>(
+    16,
+    0.75f,
+    true
+  )
+  private val activeTasks = AtomicInteger(0)
+  private val requestTasks = ConcurrentHashMap<String, ActiveRequest>()
+  private val activeRequests = ConcurrentHashMap.newKeySet<ActiveRequest>()
+  @Volatile private var shuttingDown = false
+
+  private class ActiveRequest(
+    val cancellationSignal: OnnxCancellationSignal
+  ) {
+    private lateinit var job: Job
+
+    fun attach(job: Job) {
+      this.job = job
+      if (cancellationSignal.isCancelled) {
+        job.cancel()
+      }
+    }
+
+    fun cancel() {
+      cancellationSignal.cancel()
+      if (::job.isInitialized) {
+        job.cancel()
+      }
+    }
+  }
+
+  private data class ImageCacheEntry(
+    val cachedPath: String,
+    val sourceModified: Long,
+    val sourceSize: Long
+  )
+
+  private data class DecodedImage(
+    val bitmap: Bitmap,
+    val orientedWidth: Int,
+    val orientedHeight: Int
+  )
+
+  private val transcodableExtensions = setOf("heic", "heif", "heics", "avif")
+
+  private class ModelNotReadyException : IllegalStateException(
+    "The OCR detector model is not available locally"
+  )
+  private class ImageNotFoundException(path: String) : IllegalArgumentException(
+    "Image file does not exist at path: $path"
+  )
+  private class ImageDecodeException(message: String) : IllegalArgumentException(message)
+
+  private fun respondWithError(result: Result, error: Exception, fallbackCode: String) {
+    val code = when (error) {
+      is ModelNotReadyException -> "MODEL_NOT_READY"
+      is ImageNotFoundException -> "IMAGE_NOT_FOUND"
+      is ImageDecodeException -> "IMAGE_DECODE_ERROR"
+      else -> fallbackCode
+    }
+    result.error(code, error.message ?: "OCR operation failed", null)
+  }
+
+  override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
+    channel = MethodChannel(flutterPluginBinding.binaryMessenger, "mobile_ocr")
+    channel.setMethodCallHandler(this)
+    context = flutterPluginBinding.applicationContext
+    modelManager = ModelManager(context)
+  }
+
+  override fun onMethodCall(call: MethodCall, result: Result) {
+    when (call.method) {
+      "prepareModels" -> {
+        mainScope.launch {
+          try {
+            val components = call.argument<List<String>>("components")
+              ?.toSet()
+              ?: setOf("detector", "recognizer")
+            val prepareRecognizer = components.contains("recognizer")
+            val status = withContext(Dispatchers.IO) {
+              if (prepareRecognizer) {
+                val modelFiles = getModelFiles()
+                processorMutex.withLock {
+                  if (ocrProcessor == null) {
+                    ocrProcessor = OcrProcessor(context, modelFiles)
+                  }
+                }
+                Triple(true, modelFiles.version, modelFiles.baseDir.absolutePath)
+              } else {
+                val detectorFiles = modelManager.ensureDetectionModel()
+                Triple(true, detectorFiles.version, detectorFiles.baseDir.absolutePath)
+              }
+            }
+            result.success(
+              mapOf(
+                "isReady" to status.first,
+                "version" to status.second,
+                "modelPath" to status.third
+              )
+            )
+          } catch (e: Exception) {
+            Log.e(TAG, "Model preparation failed", e)
+            result.error("MODEL_PREP_ERROR", e.message ?: "Could not prepare models", null)
+          }
+        }
+      }
+      "getModelAvailability" -> {
+        mainScope.launch {
+          try {
+            val availability = withContext(Dispatchers.IO) {
+              modelManager.getAvailability()
+            }
+            result.success(
+              mapOf(
+                "detectorReady" to availability.detectorReady,
+                "recognizerReady" to availability.recognizerReady,
+                "version" to availability.version
+              )
+            )
+          } catch (e: Exception) {
+            Log.e(TAG, "Failed to inspect OCR model availability", e)
+            result.error("MODEL_STATUS_ERROR", e.message, null)
+          }
+        }
+      }
+      "detectText" -> {
+        val imagePath = call.argument<String>("imagePath")
+        if (imagePath.isNullOrBlank()) {
+          result.error("INVALID_ARGUMENT", "Image path is required", null)
+          return
+        }
+
+        val includeAllConfidenceScores = call.argument<Boolean>("includeAllConfidenceScores") ?: false
+        val requestId = call.argument<String>("requestId")
+
+        launchRequest(requestId) { cancellationSignal ->
+          try {
+            val ocrResult = withContext(Dispatchers.IO) {
+              processImage(
+                imagePath,
+                includeAllConfidenceScores,
+                cancellationSignal
+              )
+            }
+            result.success(ocrResult)
+          } catch (e: CancellationException) {
+            result.error("CANCELLED", "OCR request was cancelled", null)
+          } catch (e: Exception) {
+            Log.e(TAG, "OCR processing failed for $imagePath", e)
+            respondWithError(result, e, "RECOGNITION_ERROR")
+          }
+        }
+      }
+      "detectTextRegions" -> {
+        val imagePath = call.argument<String>("imagePath")
+        if (imagePath.isNullOrBlank()) {
+          result.error("INVALID_ARGUMENT", "Image path is required", null)
+          return
+        }
+
+        val requestId = call.argument<String>("requestId")
+        launchRequest(requestId) { cancellationSignal ->
+          try {
+            val regionResult = withContext(Dispatchers.IO) {
+              detectTextRegions(imagePath, cancellationSignal)
+            }
+            result.success(regionResult)
+          } catch (e: CancellationException) {
+            result.error("CANCELLED", "OCR request was cancelled", null)
+          } catch (e: Exception) {
+            Log.e(TAG, "Text region detection failed for $imagePath", e)
+            respondWithError(result, e, "DETECTION_ERROR")
+          }
+        }
+      }
+      "cancelRequest" -> {
+        val requestId = call.argument<String>("requestId")
+        if (requestId.isNullOrBlank()) {
+          result.error("INVALID_ARGUMENT", "Request ID is required", null)
+          return
+        }
+        requestTasks.remove(requestId)?.cancel()
+        result.success(null)
+      }
+      "hasText" -> {
+        val imagePath = call.argument<String>("imagePath")
+        if (imagePath.isNullOrBlank()) {
+          result.error("INVALID_ARGUMENT", "Image path is required", null)
+          return
+        }
+
+        launchRequest(requestId = null) { cancellationSignal ->
+          try {
+            val detectionSummary = withContext(Dispatchers.IO) {
+              hasHighConfidenceText(
+                imagePath,
+                QUICK_DETECTION_MIN_SCORE,
+                cancellationSignal
+              )
+            }
+            val threshold = String.format(Locale.US, "%.2f", QUICK_DETECTION_MIN_SCORE)
+            val maxScore = detectionSummary.maxDetectionScore?.let {
+              String.format(Locale.US, "%.3f", it)
+            } ?: "none"
+            val bestRecognition = detectionSummary.bestRecognitionScore?.let {
+              String.format(Locale.US, "%.3f", it)
+            } ?: "none"
+            val matchedDetectionScore = detectionSummary.matchedDetectionScore?.let {
+              String.format(Locale.US, "%.3f", it)
+            } ?: "none"
+            Log.i(
+              TAG,
+              "hasText quick check result=${detectionSummary.hasText}; " +
+                "detectorHit=${detectionSummary.detectorHit} threshold=$threshold " +
+                "examined=${detectionSummary.examinedDetections} candidates=${detectionSummary.candidateCount} " +
+                "evaluated=${detectionSummary.evaluatedCandidates} maxScore=$maxScore " +
+                "bestRec=$bestRecognition matchedScore=$matchedDetectionScore"
+            )
+            result.success(detectionSummary.hasText)
+          } catch (e: Exception) {
+            Log.e(TAG, "Quick detection failed for $imagePath", e)
+            respondWithError(result, e, "DETECTION_ERROR")
+          }
+        }
+      }
+      "getPlatformVersion" -> {
+        result.success("Android ${android.os.Build.VERSION.RELEASE}")
+      }
+      "ensureImageIsDisplayable" -> {
+        val imagePath = call.argument<String>("imagePath")
+        if (imagePath.isNullOrBlank()) {
+          result.error("INVALID_ARGUMENT", "Image path is required", null)
+          return
+        }
+        mainScope.launch {
+          try {
+            val resolvedPath = withContext(Dispatchers.IO) {
+              ensureImageIsDisplayable(imagePath)
+            }
+            result.success(resolvedPath)
+          } catch (e: Exception) {
+            Log.e(TAG, "Failed to prepare displayable image for $imagePath", e)
+            respondWithError(result, e, "IMAGE_DECODE_ERROR")
+          }
+        }
+      }
+      else -> {
+        result.notImplemented()
+      }
+    }
+  }
+
+  private fun launchRequest(
+    requestId: String?,
+    operation: suspend (OnnxCancellationSignal) -> Unit
+  ) {
+    val cancellationSignal = OnnxCancellationSignal()
+    val activeRequest = ActiveRequest(cancellationSignal)
+    activeRequests.add(activeRequest)
+    if (requestId != null) {
+      requestTasks.put(requestId, activeRequest)?.cancel()
+    }
+    val job = mainScope.launch(start = CoroutineStart.UNDISPATCHED) {
+      operation(cancellationSignal)
+    }
+    activeRequest.attach(job)
+    job.invokeOnCompletion {
+      activeRequests.remove(activeRequest)
+      if (requestId != null) {
+        requestTasks.remove(requestId, activeRequest)
+      }
+    }
+  }
+
+  private suspend fun processImage(
+    imagePath: String,
+    includeAllConfidenceScores: Boolean = false,
+    cancellationSignal: OnnxCancellationSignal? = null
+  ): Map<String, Any> {
+    if (shuttingDown) {
+      throw IllegalStateException("Plugin is shutting down")
+    }
+    activeTasks.incrementAndGet()
+    try {
+      cancellationSignal?.ensureActive()
+      val processor = getOrCreateProcessor()
+      cancellationSignal?.ensureActive()
+
+      val file = java.io.File(imagePath)
+      if (!file.exists()) {
+        throw ImageNotFoundException(imagePath)
+      }
+
+      val decoded = decodeImage(
+        imagePath,
+        FULL_OCR_MAX_DIMENSION,
+        FULL_OCR_MAX_PIXELS
+      )
+      cancellationSignal?.ensureActive()
+      val imageWidth = decoded.orientedWidth
+      val imageHeight = decoded.orientedHeight
+      val scaleX = imageWidth.toFloat() / decoded.bitmap.width
+      val scaleY = imageHeight.toFloat() / decoded.bitmap.height
+
+      val ocrResults = try {
+        processor.processImage(
+          decoded.bitmap,
+          includeAllConfidenceScores,
+          cancellationSignal
+        )
+      } finally {
+        if (!decoded.bitmap.isRecycled) {
+          decoded.bitmap.recycle()
+        }
+      }
+
+      if (ocrResults.texts.isEmpty()) {
+        return hashMapOf(
+          "blocks" to emptyList<Map<String, Any>>(),
+          "imageWidth" to imageWidth,
+          "imageHeight" to imageHeight
+        )
+      }
+
+      val blocks = ocrResults.boxes.mapIndexed { index, box ->
+        val pointMaps: List<Map<String, Double>> = box.points.map { point ->
+          mapOf(
+            "x" to (point.x * scaleX).toDouble(),
+            "y" to (point.y * scaleY).toDouble()
+          )
+        }
+        val characterMaps: List<Map<String, Any>> = ocrResults.characters.getOrNull(index)?.map { character ->
+          mapOf<String, Any>(
+            "text" to character.text,
+            "confidence" to character.confidence.toDouble(),
+            "points" to character.points.map { charPoint ->
+              mapOf(
+                "x" to (charPoint.x * scaleX).toDouble(),
+                "y" to (charPoint.y * scaleY).toDouble()
+              )
+            }
+          )
+        } ?: emptyList()
+
+        hashMapOf<String, Any>(
+          "text" to ocrResults.texts[index],
+          "confidence" to ocrResults.scores[index].toDouble(),
+          "points" to pointMaps,
+          "characters" to characterMaps
+        )
+      }
+
+      return hashMapOf(
+        "blocks" to blocks,
+        "imageWidth" to imageWidth,
+        "imageHeight" to imageHeight
+      )
+    } finally {
+      activeTasks.decrementAndGet()
+    }
+  }
+
+  private suspend fun hasHighConfidenceText(
+    imagePath: String,
+    minDetectionConfidence: Float,
+    cancellationSignal: OnnxCancellationSignal? = null
+  ): QuickCheckResult {
+    if (shuttingDown) {
+      throw IllegalStateException("Plugin is shutting down")
+    }
+    activeTasks.incrementAndGet()
+    try {
+      cancellationSignal?.ensureActive()
+      val processor = getOrCreateProcessor()
+      cancellationSignal?.ensureActive()
+
+      val file = java.io.File(imagePath)
+      if (!file.exists()) {
+        throw ImageNotFoundException(imagePath)
+      }
+
+      val decoded = decodeImage(
+        imagePath,
+        REGION_MAX_DIMENSION,
+        REGION_MAX_PIXELS
+      )
+      cancellationSignal?.ensureActive()
+      return try {
+        processor.hasHighConfidenceText(
+          decoded.bitmap,
+          minDetectionConfidence,
+          cancellationSignal = cancellationSignal
+        )
+      } finally {
+        if (!decoded.bitmap.isRecycled) {
+          decoded.bitmap.recycle()
+        }
+      }
+    } finally {
+      activeTasks.decrementAndGet()
+    }
+  }
+
+  private suspend fun detectTextRegions(
+    imagePath: String,
+    cancellationSignal: OnnxCancellationSignal? = null
+  ): Map<String, Any> {
+    if (shuttingDown) {
+      throw IllegalStateException("Plugin is shutting down")
+    }
+    activeTasks.incrementAndGet()
+    try {
+      cancellationSignal?.ensureActive()
+      val file = File(imagePath)
+      if (!file.exists()) {
+        throw ImageNotFoundException(imagePath)
+      }
+      val detector = getOrCreateRegionDetector()
+      cancellationSignal?.ensureActive()
+      val decoded = decodeImage(
+        imagePath,
+        REGION_MAX_DIMENSION,
+        REGION_MAX_PIXELS
+      )
+      cancellationSignal?.ensureActive()
+      val scaleX = decoded.orientedWidth.toFloat() / decoded.bitmap.width
+      val scaleY = decoded.orientedHeight.toFloat() / decoded.bitmap.height
+
+      try {
+        val regions = detector.detect(
+          decoded.bitmap,
+          cancellationSignal
+        ).map { candidate ->
+          mapOf<String, Any>(
+            "confidence" to candidate.score.toDouble(),
+            "points" to candidate.box.points.map { point ->
+              mapOf(
+                "x" to (point.x * scaleX).toDouble(),
+                "y" to (point.y * scaleY).toDouble()
+              )
+            }
+          )
+        }
+        return mapOf(
+          "regions" to regions,
+          "imageWidth" to decoded.orientedWidth,
+          "imageHeight" to decoded.orientedHeight
+        )
+      } finally {
+        if (!decoded.bitmap.isRecycled) {
+          decoded.bitmap.recycle()
+        }
+      }
+    } finally {
+      activeTasks.decrementAndGet()
+    }
+  }
+
+  private fun ensureImageIsDisplayable(imagePath: String): String {
+    val file = File(imagePath)
+    if (!file.exists()) {
+      throw ImageNotFoundException(imagePath)
+    }
+
+    val extension = file.extension.lowercase(Locale.US)
+    if (extension.isEmpty() || !transcodableExtensions.contains(extension)) {
+      return imagePath
+    }
+
+    val lastModified = file.lastModified()
+    val size = file.length()
+    val cacheKey = file.absolutePath
+
+    return runBlocking {
+      displayableCacheMutex.withLock {
+        displayableImageCache[cacheKey]?.let { entry ->
+          val cachedFile = File(entry.cachedPath)
+          if (
+            entry.sourceModified == lastModified &&
+            entry.sourceSize == size &&
+            cachedFile.exists()
+          ) {
+            cachedFile.setLastModified(System.currentTimeMillis())
+            return@runBlocking entry.cachedPath
+          }
+          displayableImageCache.remove(cacheKey)
+          cachedFile.delete()
+        }
+
+        val decoded = decodeImage(
+          imagePath,
+          FULL_OCR_MAX_DIMENSION,
+          FULL_OCR_MAX_PIXELS
+        )
+
+        val cacheDir = File(context.cacheDir, "mobile_ocr_display").apply {
+          if (!exists()) {
+            mkdirs()
+          }
+        }
+        val digestInput = "$cacheKey:$lastModified:$size"
+        val hash = MessageDigest.getInstance("MD5").digest(digestInput.toByteArray())
+          .joinToString("") { "%02x".format(it) }
+        val cacheFile = File(cacheDir, "img_$hash.png")
+
+        try {
+          FileOutputStream(cacheFile).use { stream ->
+            val success = decoded.bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+            if (!success) {
+              throw IllegalStateException("Failed to encode PNG for $imagePath")
+            }
+          }
+        } finally {
+          if (!decoded.bitmap.isRecycled) {
+            decoded.bitmap.recycle()
+          }
+        }
+
+        displayableImageCache[cacheKey] = ImageCacheEntry(
+          cachedPath = cacheFile.absolutePath,
+          sourceModified = lastModified,
+          sourceSize = size
+        )
+        trimDisplayCache(cacheDir)
+
+        cacheFile.absolutePath
+      }
+    }
+  }
+
+  private fun trimDisplayCache(cacheDir: File) {
+    val files = cacheDir.listFiles()
+      ?.filter { it.isFile && it.name.startsWith("img_") && it.extension == "png" }
+      ?.sortedByDescending { it.lastModified() }
+      ?: return
+    var retainedBytes = 0L
+    files.forEachIndexed { index, file ->
+      val fileSize = file.length()
+      val retain = index < DISPLAY_CACHE_MAX_ENTRIES &&
+        retainedBytes + fileSize <= DISPLAY_CACHE_MAX_BYTES
+      if (retain) {
+        retainedBytes += fileSize
+      } else {
+        file.delete()
+      }
+    }
+
+    val iterator = displayableImageCache.entries.iterator()
+    while (iterator.hasNext()) {
+      if (!File(iterator.next().value.cachedPath).exists()) {
+        iterator.remove()
+      }
+    }
+  }
+
+  private fun decodeImage(
+    imagePath: String,
+    maxDimension: Int,
+    maxPixels: Long
+  ): DecodedImage {
+    val bounds = BitmapFactory.Options().apply {
+      inJustDecodeBounds = true
+    }
+    BitmapFactory.decodeFile(imagePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+      throw ImageDecodeException("Failed to read image bounds at path: $imagePath")
+    }
+
+    val options = BitmapFactory.Options().apply {
+      inSampleSize = ImageSampling.calculateInSampleSize(
+        bounds.outWidth,
+        bounds.outHeight,
+        maxDimension,
+        maxPixels
+      )
+      inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    val source = BitmapFactory.decodeFile(imagePath, options)
+      ?: throw ImageDecodeException("Failed to decode image at path: $imagePath")
+    val orientation = runCatching {
+      ExifInterface(imagePath).getAttributeInt(
+        ExifInterface.TAG_ORIENTATION,
+        ExifInterface.ORIENTATION_NORMAL
+      )
+    }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+    val corrected = applyExifOrientation(source, orientation)
+    if (corrected !== source && !source.isRecycled) {
+      source.recycle()
+    }
+
+    val swapsDimensions = orientation == ExifInterface.ORIENTATION_ROTATE_90 ||
+      orientation == ExifInterface.ORIENTATION_ROTATE_270 ||
+      orientation == ExifInterface.ORIENTATION_TRANSPOSE ||
+      orientation == ExifInterface.ORIENTATION_TRANSVERSE
+    return DecodedImage(
+      bitmap = corrected,
+      orientedWidth = if (swapsDimensions) bounds.outHeight else bounds.outWidth,
+      orientedHeight = if (swapsDimensions) bounds.outWidth else bounds.outHeight
+    )
+  }
+
+  private fun applyExifOrientation(source: Bitmap, orientation: Int): Bitmap {
+    return runCatching {
+      val matrix = Matrix()
+      var transformed = true
+      when (orientation) {
+        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+        ExifInterface.ORIENTATION_TRANSPOSE -> {
+          matrix.postRotate(90f)
+          matrix.preScale(-1f, 1f)
+        }
+        ExifInterface.ORIENTATION_TRANSVERSE -> {
+          matrix.postRotate(270f)
+          matrix.preScale(-1f, 1f)
+        }
+        else -> transformed = false
+      }
+
+      if (!transformed || matrix.isIdentity) {
+        source
+      } else {
+        Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+      }
+    }.getOrDefault(source)
+  }
+
+  override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+    channel.setMethodCallHandler(null)
+    shuttingDown = true
+    activeRequests.forEach(ActiveRequest::cancel)
+    mainScope.cancel()
+    requestTasks.clear()
+    runBlocking {
+      withTimeoutOrNull(5_000) {
+        while (activeTasks.get() > 0) {
+          delay(50)
+        }
+      }
+      processorMutex.withLock {
+        ocrProcessor?.close()
+        ocrProcessor = null
+      }
+      regionDetectorMutex.withLock {
+        textRegionDetector?.close()
+        textRegionDetector = null
+      }
+      modelMutex.withLock {
+        cachedModelFiles = null
+      }
+    }
+    activeRequests.clear()
+    displayableImageCache.clear()
+  }
+
+  private suspend fun getModelFiles(): ModelFiles {
+    return modelMutex.withLock {
+      cachedModelFiles?.let { return@withLock it }
+      val files = modelManager.ensureModels()
+      cachedModelFiles = files
+      files
+    }
+  }
+
+  private suspend fun getOrCreateProcessor(): OcrProcessor {
+    val modelFiles = getModelFiles()
+    return processorMutex.withLock {
+      ocrProcessor ?: OcrProcessor(context, modelFiles).also { created ->
+        ocrProcessor = created
+      }
+    }
+  }
+
+  private suspend fun getOrCreateRegionDetector(): TextRegionDetector {
+    return regionDetectorMutex.withLock {
+      textRegionDetector ?: TextRegionDetector(
+        modelManager.getDetectionModelIfAvailable()
+          ?: throw ModelNotReadyException()
+      ).also { created ->
+        textRegionDetector = created
+      }
+    }
+  }
+}

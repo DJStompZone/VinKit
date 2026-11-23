@@ -336,11 +336,9 @@ packages:
   mobile_ocr:
     dependency: "direct main"
     description:
-      path: "."
-      ref: HEAD
-      resolved-ref: "0c68f88f20607cfcb10286422860350ccb024acd"
-      url: "https://github.com/ente-io/mobile_ocr"
-    source: git
+      path: "packages/mobile_ocr"
+      relative: true
+    source: path
     version: "1.0.0"
   mobile_scanner:
     dependency: "direct main"

@@ -38,8 +38,7 @@ dependencies:
   mobile_scanner: ^7.5.0
   camera: ^0.12.2
   mobile_ocr:
-    git:
-      url: https://github.com/ente-io/mobile_ocr
+    path: packages/mobile_ocr
   dio: ^5.11.1
   permission_handler: ^13.0.2
 
