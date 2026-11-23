@@ -12,13 +12,27 @@ on:
       - master
       - main
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create and publish (e.g. v1.0.1). Leave blank to run builds without creating a release.'
+        required: false
+        type: string
+      description:
+        description: 'Custom release description (prepended to auto-generated patch notes).'
+        required: false
+        type: string
+      prerelease:
+        description: 'Mark this release as a pre-release'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.tag || '' }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch' }}
 
 jobs:
   analyze-and-test:
@@ -53,11 +67,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -151,9 +165,31 @@ jobs:
       - build-android
       - build-web
       - build-windows
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            RAW_TAG="$INPUT_TAG"
+          else
+            RAW_TAG="$REF_NAME"
+          fi
+          if [[ "$RAW_TAG" != v* ]]; then
+            NORMALIZED_TAG="v$RAW_TAG"
+          else
+            NORMALIZED_TAG="$RAW_TAG"
+          fi
+          echo "tag_name=$NORMALIZED_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_name=VinKit $NORMALIZED_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -163,6 +199,11 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.release_name }}
+          target_commitish: ${{ github.sha }}
+          body: ${{ inputs.description }}
+          prerelease: ${{ inputs.prerelease || false }}
           generate_release_notes: true
           files: |
             release-assets/vinkit-android-release.apk
