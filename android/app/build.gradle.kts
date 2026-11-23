@@ -11,7 +11,7 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    namespace = "zone.stomp.vinkit.vinkit_app"
+    namespace = "zone.stomp.vinkit"
     compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
@@ -21,7 +21,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "zone.stomp.vinkit.vinkit_app"
+        applicationId = "zone.stomp.vinkit"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

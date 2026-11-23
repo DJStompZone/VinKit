@@ -1,4 +1,4 @@
-package zone.stomp.vinkit.vinkit_app
+package zone.stomp.vinkit
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
