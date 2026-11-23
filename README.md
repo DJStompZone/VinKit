@@ -2,6 +2,8 @@
 
 A multiplatform (Android, iOS, Web, and Windows Desktop) Flutter application for scanning automotive VIN barcodes and reading plaintext printed VINs via on-device OCR, validating 17-character VINs, and immediately displaying vehicle specs, as well as product codes for motor oil, filters, wipers, and maintenance fluids.
 
+[![VinKit CI/CD](https://github.com/DJStompZone/VinKit/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/DJStompZone/VinKit/actions/workflows/ci-cd.yml)
+
 ## Features
 
 - **Automotive VIN Barcode Scanner:** Live full-screen camera preview powered by `mobile_scanner`, supporting linear and 2D vehicle sticker formats (`Code 39`, `Code 128`, `Code 93`, `DataMatrix`, `PDF417`, and `QR`) with a horizontal viewfinder cutout.
