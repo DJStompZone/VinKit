@@ -13,6 +13,7 @@ class CameraPermissionView extends StatelessWidget {
     required this.onRetryCamera,
     required this.onManualEntry,
     this.openSettingsAction,
+    this.topPadding = 24.0,
   });
 
   /// Exception reported by [MobileScannerController].
@@ -26,6 +27,10 @@ class CameraPermissionView extends StatelessWidget {
 
   /// Optional settings launcher override used in tests.
   final Future<bool> Function()? openSettingsAction;
+
+  /// Top padding inside the scrollable container (can be increased when an
+  /// overlaid scanner HUD sits above this view).
+  final double topPadding;
 
   @override
   Widget build(BuildContext context) {
@@ -53,8 +58,17 @@ class CameraPermissionView extends StatelessWidget {
     } else {
       icon = Icons.error_outline_rounded;
       title = 'Camera Unavailable';
-      description = error.errorDetails?.message ??
-          'Unable to start the camera preview right now. Try again or enter a VIN manually.';
+      final rawMessage = error.errorDetails?.message?.trim();
+      final looksLikeStackOrNativeDump =
+          rawMessage == null ||
+          rawMessage.isEmpty ||
+          rawMessage.length > 140 ||
+          rawMessage.contains('Exception') ||
+          rawMessage.contains('SurfaceConfig') ||
+          rawMessage.contains('java.lang.');
+      description = looksLikeStackOrNativeDump
+          ? 'Unable to start the camera preview right now. Try again or enter a VIN manually.'
+          : rawMessage;
     }
 
     return ColoredBox(
@@ -62,7 +76,7 @@ class CameraPermissionView extends StatelessWidget {
       child: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.fromLTRB(24, topPadding, 24, 24),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 400),
               child: Column(

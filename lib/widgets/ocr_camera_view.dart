@@ -8,9 +8,11 @@ import 'package:material_ui/material_ui.dart';
 import 'package:mobile_scanner/mobile_scanner.dart'
     show BarcodeCapture, TorchState;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:vinkit_app/services/camera_permission_service.dart';
 import 'package:vinkit_app/services/ocr_image_preprocessor.dart';
 import 'package:vinkit_app/services/vin_ocr_service.dart';
 import 'package:vinkit_app/services/vin_validator.dart';
+import 'package:vinkit_app/widgets/camera_fallback_manual_view.dart';
 import 'package:vinkit_app/widgets/scanner_controls.dart';
 import 'package:vinkit_app/widgets/scanner_overlay.dart';
 
@@ -33,6 +35,7 @@ class OcrCameraView extends StatefulWidget {
     this.onAnalyzeBarcodeImage,
     this.switchCameraSignal,
     this.onSwitchStrictnessToNormal,
+    this.onCameraAvailabilityChanged,
     this.preprocessor = const OcrImagePreprocessor(),
   });
 
@@ -74,6 +77,10 @@ class OcrCameraView extends StatefulWidget {
   /// candidate only matches under Normal mode.
   final VoidCallback? onSwitchStrictnessToNormal;
 
+  /// Optional callback notified whenever camera availability changes (for
+  /// example, so the parent HUD can dim camera controls during hardware errors).
+  final ValueChanged<bool>? onCameraAvailabilityChanged;
+
   /// Native image preprocessor cropping to the viewfinder ROI and applying
   /// user-selected HDR & gamma enhancement before recognition.
   final OcrImagePreprocessor preprocessor;
@@ -92,6 +99,9 @@ class _OcrCameraViewState extends State<OcrCameraView>
   List<CameraDescription> _cameras = const <CameraDescription>[];
   int _selectedCameraIndex = 0;
   int _cameraGeneration = 0;
+  Future<void> _cameraOpChain = Future<void>.value();
+  bool _isAppForeground = true;
+  bool? _lastReportedCameraAvailable;
 
   bool _isInitializingCamera = true;
   bool _isSwitchingCamera = false;
@@ -225,15 +235,18 @@ class _OcrCameraViewState extends State<OcrCameraView>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused) {
-      if (_cameraController != null) {
-        unawaited(_disposeCamera());
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      _isAppForeground = false;
+      unawaited(_disposeCamera());
+    } else if (state == AppLifecycleState.resumed) {
+      _isAppForeground = true;
+      if (!widget.isPaused &&
+          _cameraController == null &&
+          !_isInitializingCamera) {
+        unawaited(_initializeCamera());
       }
-    } else if (state == AppLifecycleState.resumed &&
-        !widget.isPaused &&
-        _cameraController == null) {
-      unawaited(_initializeCamera());
     }
   }
 
@@ -310,25 +323,106 @@ class _OcrCameraViewState extends State<OcrCameraView>
     }
   }
 
-  Future<void> _initializeCamera() async {
-    if (!mounted) {
+  void _reportCameraAvailability(bool available) {
+    if (_lastReportedCameraAvailable == available) {
       return;
     }
+    _lastReportedCameraAvailable = available;
+    widget.onCameraAvailabilityChanged?.call(available);
+  }
+
+  /// Serializes all camera init/dispose work so CameraX never binds two
+  /// [CameraController] instances concurrently.
+  Future<void> _enqueueCameraOp(Future<void> Function() op) {
+    final next = _cameraOpChain.then((_) => op(), onError: (_) => op());
+    _cameraOpChain = next.catchError((_) {});
+    return next;
+  }
+
+  String _sanitizeCameraErrorMessage(String? rawDescription) {
+    final trimmed = rawDescription?.trim();
+    if (trimmed == null ||
+        trimmed.isEmpty ||
+        trimmed.length > 140 ||
+        trimmed.contains('Exception') ||
+        trimmed.contains('SurfaceConfig') ||
+        trimmed.contains('java.lang.')) {
+      return 'Unable to start the camera preview right now. Tap Retry Camera or enter a VIN manually below.';
+    }
+    return trimmed;
+  }
+
+  Future<CameraController> _createAndInitializeController(
+    CameraDescription description,
+    ImageFormatGroup formatGroup,
+  ) async {
+    Future<CameraController> tryPreset(ResolutionPreset preset) async {
+      final candidate = CameraController(
+        description,
+        preset,
+        enableAudio: false,
+        imageFormatGroup: formatGroup,
+      );
+      try {
+        await candidate.initialize();
+        return candidate;
+      } catch (_) {
+        try {
+          await candidate.dispose();
+        } catch (_) {
+          // Ignore secondary cleanup errors after failed init.
+        }
+        rethrow;
+      }
+    }
+
+    try {
+      return await tryPreset(ResolutionPreset.high);
+    } on CameraException catch (error) {
+      final details = '${error.code} ${error.description ?? ''}'.toLowerCase();
+      final isSurfaceCombinationError =
+          details.contains('surface combination') ||
+          details.contains('illegalargumentexception') ||
+          details.contains('bind too many');
+      if (!isSurfaceCombinationError) {
+        rethrow;
+      }
+      // Give CameraX a brief beat to finish releasing surfaces, then retry at
+      // medium resolution which fits all Android LIMITED/LEGACY camera levels.
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      return tryPreset(ResolutionPreset.medium);
+    }
+  }
+
+  Future<void> _initializeCamera() {
     final generation = ++_cameraGeneration;
+    return _enqueueCameraOp(() => _initializeCameraInternal(generation));
+  }
+
+  Future<void> _initializeCameraInternal(int generation) async {
+    if (!mounted || !_isAppForeground || generation != _cameraGeneration) {
+      return;
+    }
     setState(() {
       _isInitializingCamera = true;
       _cameraError = null;
       _isPermissionDenied = false;
     });
 
-    await _disposeCamera(bumpGeneration: false);
-    if (!mounted || generation != _cameraGeneration) {
+    await _disposeCameraInternal();
+    if (!mounted || !_isAppForeground || generation != _cameraGeneration) {
+      if (mounted) {
+        setState(() => _isInitializingCamera = false);
+      }
       return;
     }
 
     try {
       final cameras = await availableCameras();
-      if (!mounted || generation != _cameraGeneration) {
+      if (!mounted || !_isAppForeground || generation != _cameraGeneration) {
+        if (mounted) {
+          setState(() => _isInitializingCamera = false);
+        }
         return;
       }
       if (cameras.isEmpty) {
@@ -336,6 +430,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
           _isInitializingCamera = false;
           _cameraError = 'No camera was detected on this device.';
         });
+        _reportCameraAvailability(false);
         return;
       }
 
@@ -356,16 +451,18 @@ class _OcrCameraViewState extends State<OcrCameraView>
       final formatGroup = defaultTargetPlatform == TargetPlatform.iOS
           ? ImageFormatGroup.bgra8888
           : ImageFormatGroup.yuv420;
-      final controller = CameraController(
+      final controller = await _createAndInitializeController(
         _cameras[_selectedCameraIndex],
-        ResolutionPreset.high,
-        enableAudio: false,
-        imageFormatGroup: formatGroup,
+        formatGroup,
       );
 
-      await controller.initialize();
-      if (!mounted || generation != _cameraGeneration) {
-        await controller.dispose();
+      if (!mounted || !_isAppForeground || generation != _cameraGeneration) {
+        try {
+          await controller.dispose();
+        } catch (_) {}
+        if (mounted) {
+          setState(() => _isInitializingCamera = false);
+        }
         return;
       }
 
@@ -413,8 +510,13 @@ class _OcrCameraViewState extends State<OcrCameraView>
         // Exposure offset queries may not be supported on all cameras.
       }
 
-      if (!mounted || generation != _cameraGeneration) {
-        await controller.dispose();
+      if (!mounted || !_isAppForeground || generation != _cameraGeneration) {
+        try {
+          await controller.dispose();
+        } catch (_) {}
+        if (mounted) {
+          setState(() => _isInitializingCamera = false);
+        }
         return;
       }
 
@@ -442,6 +544,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
         _exposureOffset = restoredEv;
         _isInitializingCamera = false;
       });
+      _reportCameraAvailability(true);
 
       if (!widget.isPaused) {
         await _syncContinuousCapture(controller);
@@ -457,23 +560,30 @@ class _OcrCameraViewState extends State<OcrCameraView>
         _isPermissionDenied = denied;
         _cameraError = denied
             ? 'Camera permission is required to scan VIN barcodes and printed text.'
-            : (error.description ?? 'Unable to start camera preview.');
+            : _sanitizeCameraErrorMessage(error.description);
       });
+      _reportCameraAvailability(false);
     } catch (_) {
       if (!mounted || generation != _cameraGeneration) {
         return;
       }
       setState(() {
         _isInitializingCamera = false;
-        _cameraError = 'Unable to start camera preview.';
+        _cameraError =
+            'Unable to start the camera preview right now. Tap Retry Camera or enter a VIN manually below.';
       });
+      _reportCameraAvailability(false);
     }
   }
 
-  Future<void> _disposeCamera({bool bumpGeneration = true}) async {
+  Future<void> _disposeCamera({bool bumpGeneration = true}) {
     if (bumpGeneration) {
       _cameraGeneration++;
     }
+    return _enqueueCameraOp(_disposeCameraInternal);
+  }
+
+  Future<void> _disposeCameraInternal() async {
     _fallbackContinuousTimer?.cancel();
     _fallbackContinuousTimer = null;
 
@@ -1179,83 +1289,22 @@ class _OcrCameraViewState extends State<OcrCameraView>
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
     final controller = _cameraController;
     final isReady = controller != null && controller.value.isInitialized;
     final applyPreviewFilter = _hdrEnabled || (_gamma - 1.0).abs() >= 0.02;
 
     if (_cameraError != null) {
-      return ColoredBox(
-        color: colorScheme.surface,
-        child: SafeArea(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 400),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Icon(
-                      _isPermissionDenied
-                          ? Icons.no_photography_rounded
-                          : Icons.videocam_off_rounded,
-                      size: 48,
-                      color: colorScheme.error,
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      _isPermissionDenied
-                          ? 'Camera Permission Required'
-                          : 'Camera Unavailable',
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      _cameraError!,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            color: colorScheme.onSurfaceVariant,
-                          ),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 20),
-                    if (_isPermissionDenied && !kIsWeb) ...<Widget>[
-                      SizedBox(
-                        width: double.infinity,
-                        child: FilledButton.icon(
-                          onPressed: () => unawaited(openAppSettings()),
-                          icon: const Icon(Icons.settings_rounded),
-                          label: const Text('Open App Settings'),
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                    ],
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: () => unawaited(_initializeCamera()),
-                        icon: const Icon(Icons.refresh_rounded),
-                        label: const Text('Retry Camera'),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.tonalIcon(
-                        onPressed: () => widget.onManualEntryTap(null),
-                        icon: const Icon(Icons.keyboard_alt_outlined),
-                        label: const Text('Enter VIN Manually'),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
+      return CameraFallbackManualView(
+        validator: widget.validator,
+        strictness: widget.strictness,
+        permissionState: _isPermissionDenied
+            ? CameraPermissionState.permanentlyDenied
+            : CameraPermissionState.granted,
+        cameraHardwareError: _isPermissionDenied ? null : _cameraError,
+        onSubmitVin: widget.onVinRecognized,
+        onOpenSettings:
+            _isPermissionDenied && !kIsWeb ? () => unawaited(openAppSettings()) : null,
+        onRetryCamera: () => unawaited(_initializeCamera()),
       );
     }
 

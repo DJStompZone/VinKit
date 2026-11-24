@@ -109,6 +109,7 @@ class _VinKitAppState extends State<VinKitApp> {
             onCycleThemeMode: _cycleThemeMode,
             feedbackService: widget.feedbackService,
             ocrService: widget.ocrService,
+            deferCameraPermissionPrompt: _showSplash,
           ),
           if (_showSplash)
             StartupSplashOverlay(

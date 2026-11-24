@@ -13,6 +13,7 @@ import 'package:vinkit_app/models/vin_lookup_exception.dart';
 import 'package:vinkit_app/models/vin_lookup_result.dart';
 import 'package:vinkit_app/screens/scanner_screen.dart';
 import 'package:vinkit_app/screens/vehicle_result_screen.dart';
+import 'package:vinkit_app/services/camera_permission_service.dart';
 import 'package:vinkit_app/services/scanner_feedback_service.dart';
 import 'package:vinkit_app/services/vin_lookup_controller.dart';
 import 'package:vinkit_app/services/vin_lookup_service.dart';
@@ -24,6 +25,38 @@ import 'package:vinkit_app/widgets/manual_vin_sheet.dart';
 import 'package:vinkit_app/widgets/scanner_controls.dart';
 import 'package:vinkit_app/widgets/scanner_overlay.dart';
 import 'package:vinkit_app/widgets/startup_splash_overlay.dart';
+
+class _FakePermissionService implements CameraPermissionService {
+  _FakePermissionService({
+    required this.currentStatus,
+    this.requestCompleter,
+  });
+
+  CameraPermissionState currentStatus;
+  Completer<CameraPermissionState>? requestCompleter;
+  int requestCount = 0;
+  int openSettingsCount = 0;
+
+  @override
+  Future<CameraPermissionState> checkStatus() async => currentStatus;
+
+  @override
+  Future<CameraPermissionState> requestPermission() async {
+    requestCount++;
+    if (requestCompleter != null) {
+      final result = await requestCompleter!.future;
+      currentStatus = result;
+      return result;
+    }
+    return currentStatus;
+  }
+
+  @override
+  Future<bool> openSettings() async {
+    openSettingsCount++;
+    return true;
+  }
+}
 
 class _FakeFeedbackService implements ScannerFeedbackService {
   int playCount = 0;
@@ -851,5 +884,172 @@ void main() {
       await tester.tap(find.text('Edit'));
       expect(editTapped, isTrue);
     });
+  });
+
+  group('ScannerScreen camera permission waiting & graceful manual fallback', () {
+    testWidgets(
+      'waits calmly for permission without mounting camera, falls back to manual entry with greyed-out controls on denial, and recovers when allowed',
+      (tester) async {
+        final requestCompleter = Completer<CameraPermissionState>();
+        final permissions = _FakePermissionService(
+          currentStatus: CameraPermissionState.denied,
+          requestCompleter: requestCompleter,
+        );
+        String? lookedUpVin;
+        final controller = VinLookupController(
+          service: _FakeVinLookupService((vin) async {
+            lookedUpVin = vin;
+            return _explorerResult();
+          }),
+        );
+        final feedback = _FakeFeedbackService();
+        addTearDown(controller.dispose);
+
+        var cameraMountCount = 0;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.darkTheme,
+            home: ScannerScreen(
+              vinController: controller,
+              validator: const VinValidator(),
+              themeMode: ThemeMode.dark,
+              onCycleThemeMode: () {},
+              feedbackService: feedback,
+              ocrService: const _FakeOcrService(),
+              permissionService: permissions,
+              cameraScannerSupportedOverride: true,
+              ocrViewBuilder: (
+                context, {
+                required ocrService,
+                required validator,
+                required strictness,
+                required scanWindow,
+                required isPaused,
+                required isBarcodeMode,
+                required isContinuous,
+                required onVinRecognized,
+                required onManualEntryTap,
+                required onSwitchStrictnessToNormal,
+              }) {
+                cameraMountCount++;
+                return const ColoredBox(
+                  color: Colors.black,
+                  child: Center(child: Text('Live Camera Active')),
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pump();
+
+        // While waiting on the OS permission dialog, camera must NOT mount and
+        // no scary error should appear; manual entry is already available.
+        expect(cameraMountCount, 0);
+        expect(find.text('Live Camera Active'), findsNothing);
+        expect(find.text('Camera Unavailable'), findsNothing);
+        expect(find.text('Waiting for camera access'), findsOneWidget);
+        expect(find.text('Manual VIN Entry'), findsOneWidget);
+
+        // User denies camera permission.
+        requestCompleter.complete(CameraPermissionState.denied);
+        await tester.pumpAndSettle();
+
+        expect(cameraMountCount, 0);
+        expect(find.text('Camera scanning disabled'), findsOneWidget);
+        expect(find.text('Allow Camera'), findsOneWidget);
+        expect(find.text('Settings'), findsOneWidget);
+
+        // Tapping a greyed-out camera control shows a tooltip/snackbar hint.
+        await tester.tap(find.text('OCR'));
+        await tester.pump();
+        expect(
+          find.text('Allow camera access to enable barcode & OCR scanning.'),
+          findsOneWidget,
+        );
+
+        // Tapping Settings invokes openSettings().
+        await tester.tap(find.text('Settings').first);
+        await tester.pump();
+        expect(permissions.openSettingsCount, 1);
+
+        // Manual entry + Normal/Strict still works seamlessly while camera is off.
+        await tester.enterText(find.byType(TextField), '5NPD84LF0KH412345A');
+        await tester.pump();
+        expect(find.text('Valid 17-character VIN ready'), findsOneWidget);
+
+        await tester.tap(find.text('Look Up Vehicle Specs'));
+        await tester.pumpAndSettle();
+
+        expect(lookedUpVin, '5NPD84LF0KH412345');
+        expect(find.text('2022 Ford Explorer'), findsOneWidget);
+
+        // Return to scanner screen.
+        await tester.tap(find.text('Scan Next Vehicle'));
+        await tester.pumpAndSettle();
+
+        // User enables permission in system Settings and returns to the app.
+        permissions.currentStatus = CameraPermissionState.granted;
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await tester.pumpAndSettle();
+
+        expect(cameraMountCount, greaterThanOrEqualTo(1));
+        expect(find.text('Live Camera Active'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'shows Open Settings link on permanent denial without nagging with a prompt',
+      (tester) async {
+        final permissions = _FakePermissionService(
+          currentStatus: CameraPermissionState.permanentlyDenied,
+        );
+        final controller = VinLookupController(
+          service: _FakeVinLookupService((_) async => _explorerResult()),
+        );
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.lightTheme,
+            home: ScannerScreen(
+              vinController: controller,
+              validator: const VinValidator(),
+              themeMode: ThemeMode.light,
+              onCycleThemeMode: () {},
+              feedbackService: _FakeFeedbackService(),
+              ocrService: const _FakeOcrService(),
+              permissionService: permissions,
+              cameraScannerSupportedOverride: true,
+              ocrViewBuilder: (
+                context, {
+                required ocrService,
+                required validator,
+                required strictness,
+                required scanWindow,
+                required isPaused,
+                required isBarcodeMode,
+                required isContinuous,
+                required onVinRecognized,
+                required onManualEntryTap,
+                required onSwitchStrictnessToNormal,
+              }) =>
+                  const Text('Live Camera Active'),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(permissions.requestCount, 0);
+        expect(find.text('Camera scanning disabled'), findsOneWidget);
+        expect(find.text('Open Settings'), findsOneWidget);
+        expect(find.text('Allow Camera'), findsNothing);
+        expect(find.text('Manual VIN Entry'), findsOneWidget);
+
+        await tester.tap(find.text('Open Settings'));
+        await tester.pump();
+        expect(permissions.openSettingsCount, 1);
+      },
+    );
   });
 }

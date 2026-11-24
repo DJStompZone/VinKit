@@ -6,10 +6,12 @@ import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:vinkit_app/screens/vehicle_result_screen.dart';
+import 'package:vinkit_app/services/camera_permission_service.dart';
 import 'package:vinkit_app/services/scanner_feedback_service.dart';
 import 'package:vinkit_app/services/vin_lookup_controller.dart';
 import 'package:vinkit_app/services/vin_ocr_service.dart';
 import 'package:vinkit_app/services/vin_validator.dart';
+import 'package:vinkit_app/widgets/camera_fallback_manual_view.dart';
 import 'package:vinkit_app/widgets/camera_permission_view.dart';
 import 'package:vinkit_app/widgets/desktop_vin_entry_view.dart';
 import 'package:vinkit_app/widgets/manual_vin_sheet.dart';
@@ -68,6 +70,8 @@ class ScannerScreen extends StatefulWidget {
     required this.onCycleThemeMode,
     this.feedbackService = const PlatformScannerFeedbackService(),
     this.ocrService,
+    this.permissionService,
+    this.deferCameraPermissionPrompt = false,
     this.initialStrictness = VinScanStrictness.normal,
     this.cameraScannerSupportedOverride,
     this.ocrViewBuilder,
@@ -90,6 +94,14 @@ class ScannerScreen extends StatefulWidget {
 
   /// Optional on-device OCR service override for tests or custom backends.
   final VinOcrService? ocrService;
+
+  /// Optional runtime camera permission service override for tests.
+  final CameraPermissionService? permissionService;
+
+  /// When `true` (e.g. while the startup splash animation is running), defers
+  /// popping up the OS camera permission dialog until the splash finishes.
+  /// Already-granted permissions still initialize immediately.
+  final bool deferCameraPermissionPrompt;
 
   /// Initial VIN matching strictness (`Normal` by default).
   final VinScanStrictness initialStrictness;
@@ -136,6 +148,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     with WidgetsBindingObserver {
   MobileScannerController? _scannerController;
   late final VinOcrService _ocrService;
+  late final CameraPermissionService _permissionService;
   final ValueNotifier<int> _switchCameraSignal = ValueNotifier<int>(0);
 
   ScannerCaptureMode _captureMode = ScannerCaptureMode.barcode;
@@ -143,6 +156,10 @@ class _ScannerScreenState extends State<ScannerScreen>
   ScannerTriggerMode _ocrTriggerMode = ScannerTriggerMode.snap;
   late VinScanStrictness _strictness;
   bool _isSwitchingCameraBackend = false;
+
+  late CameraPermissionState _cameraPermissionState;
+  bool _hasPromptedCameraPermission = false;
+  bool _isCameraHardwareAvailable = true;
 
   double _zoomScale = 0.0;
   bool _isScanLocked = false;
@@ -157,6 +174,12 @@ class _ScannerScreenState extends State<ScannerScreen>
       ScannerScreen.isCameraScannerSupported();
 
   bool get _supportsOcr => _ocrService.isSupported;
+
+  bool get _isCameraGranted =>
+      _cameraPermissionState == CameraPermissionState.granted;
+
+  bool get _canUseCameraFeatures =>
+      _isCameraGranted && _isCameraHardwareAvailable;
 
   /// Whether the platform supports Snap capture mode and unified EV/Gamma/HDR
   /// camera controls (Android and iOS).
@@ -194,18 +217,176 @@ class _ScannerScreenState extends State<ScannerScreen>
     WidgetsBinding.instance.addObserver(this);
     _strictness = widget.initialStrictness;
     _ocrService = widget.ocrService ?? createPlatformVinOcrService();
+    _permissionService =
+        widget.permissionService ?? const PlatformCameraPermissionService();
+
+    final skipInitialPermissionGate =
+        kIsWeb ||
+        (widget.ocrViewBuilder != null && widget.permissionService == null);
+    _cameraPermissionState = skipInitialPermissionGate
+        ? CameraPermissionState.granted
+        : CameraPermissionState.checking;
+
     if (_supportsCameraScanner) {
       _scannerController = MobileScannerController(
-        autoStart: !_usesUnifiedCameraView,
+        autoStart: kIsWeb && !_usesUnifiedCameraView,
         formats: ScannerScreen.vinBarcodeFormats,
         detectionSpeed: DetectionSpeed.normal,
       );
+      if (!skipInitialPermissionGate) {
+        unawaited(_initializeCameraPermission());
+      }
     }
   }
 
   @override
+  void didUpdateWidget(covariant ScannerScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.deferCameraPermissionPrompt &&
+        !widget.deferCameraPermissionPrompt &&
+        _supportsCameraScanner &&
+        _cameraPermissionState == CameraPermissionState.checking &&
+        !_hasPromptedCameraPermission) {
+      unawaited(_requestCameraPermission());
+    }
+  }
+
+  Future<void> _initializeCameraPermission() async {
+    final status = await _permissionService.checkStatus();
+    if (!mounted) {
+      return;
+    }
+    if (status == CameraPermissionState.granted) {
+      setState(() {
+        _cameraPermissionState = CameraPermissionState.granted;
+        _isCameraHardwareAvailable = true;
+      });
+      if (!_usesUnifiedCameraView && !_isScanLocked) {
+        unawaited(_resumeCamera());
+      }
+      return;
+    }
+    if (status == CameraPermissionState.denied &&
+        !_hasPromptedCameraPermission) {
+      if (widget.deferCameraPermissionPrompt) {
+        // Stay calmly in checking/waiting state until startup splash finishes,
+        // then didUpdateWidget triggers the OS prompt cleanly.
+        return;
+      }
+      await _requestCameraPermission();
+      return;
+    }
+    setState(() => _cameraPermissionState = status);
+  }
+
+  Future<void> _requestCameraPermission() async {
+    if (_cameraPermissionState == CameraPermissionState.requesting ||
+        !mounted) {
+      return;
+    }
+    _hasPromptedCameraPermission = true;
+    setState(() => _cameraPermissionState = CameraPermissionState.requesting);
+
+    final result = await _permissionService.requestPermission();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _cameraPermissionState = result;
+      if (result == CameraPermissionState.granted) {
+        _isCameraHardwareAvailable = true;
+      }
+    });
+    if (result == CameraPermissionState.granted &&
+        !_usesUnifiedCameraView &&
+        !_isScanLocked) {
+      unawaited(_resumeCamera());
+    }
+  }
+
+  Future<void> _recheckCameraPermissionOnResume() async {
+    if (_cameraPermissionState == CameraPermissionState.requesting ||
+        !_supportsCameraScanner) {
+      return;
+    }
+    final status = await _permissionService.checkStatus();
+    if (!mounted ||
+        _cameraPermissionState == CameraPermissionState.requesting) {
+      return;
+    }
+    if (status == CameraPermissionState.granted &&
+        _cameraPermissionState != CameraPermissionState.granted) {
+      setState(() {
+        _cameraPermissionState = CameraPermissionState.granted;
+        _isCameraHardwareAvailable = true;
+      });
+      if (!_usesUnifiedCameraView && !_isScanLocked) {
+        unawaited(_resumeCamera());
+      }
+    } else if (status != CameraPermissionState.granted &&
+        _cameraPermissionState == CameraPermissionState.granted) {
+      unawaited(_stopScanning());
+      setState(() => _cameraPermissionState = status);
+    }
+  }
+
+  Future<void> _openCameraSettings() async {
+    await _permissionService.openSettings();
+  }
+
+  void _showCameraDisabledHint() {
+    if (!mounted) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) {
+      return;
+    }
+    messenger.hideCurrentSnackBar();
+
+    final isHardwareIssue = _isCameraGranted && !_isCameraHardwareAvailable;
+    final String message;
+    final SnackBarAction? action;
+
+    if (isHardwareIssue) {
+      message = 'Camera is currently unavailable. Tap Retry Camera or enter a VIN below.';
+      action = null;
+    } else if (_cameraPermissionState == CameraPermissionState.checking ||
+        _cameraPermissionState == CameraPermissionState.requesting) {
+      message = 'Allow camera access to enable barcode & OCR scanning.';
+      action = null;
+    } else if (_cameraPermissionState == CameraPermissionState.denied) {
+      message = 'Allow camera access to enable barcode & OCR scanning.';
+      action = SnackBarAction(
+        label: 'Allow',
+        onPressed: () => unawaited(_requestCameraPermission()),
+      );
+    } else {
+      message = 'Allow camera access in Settings to enable scanning.';
+      action = SnackBarAction(
+        label: 'Settings',
+        onPressed: () => unawaited(_openCameraSettings()),
+      );
+    }
+
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        action: action,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (_scannerController == null || _usesUnifiedCameraView) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_recheckCameraPermissionOnResume());
+    }
+    if (_scannerController == null ||
+        _usesUnifiedCameraView ||
+        !_isCameraGranted) {
       return;
     }
     if (state == AppLifecycleState.inactive ||
@@ -261,7 +442,8 @@ class _ScannerScreenState extends State<ScannerScreen>
     if (controller == null ||
         !mounted ||
         _isScanLocked ||
-        _usesUnifiedCameraView) {
+        _usesUnifiedCameraView ||
+        !_isCameraGranted) {
       return;
     }
     final scannerState = controller.value;
@@ -638,7 +820,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     widget.vinController.reset();
 
     if (closeAction == VehicleResultAction.enterDifferentVin) {
-      if (_supportsCameraScanner) {
+      if (_supportsCameraScanner && _canUseCameraFeatures) {
         await _openManualEntrySheet(initialVin: vin, alreadyLocked: true);
         return;
       }
@@ -647,7 +829,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     }
 
     setState(() => _isScanLocked = false);
-    if (!_usesUnifiedCameraView) {
+    if (!_usesUnifiedCameraView && _isCameraGranted) {
       await _resumeCamera();
     }
   }
@@ -709,16 +891,32 @@ class _ScannerScreenState extends State<ScannerScreen>
     final isBarcodeMode = _captureMode == ScannerCaptureMode.barcode;
     final isContinuous = _activeTriggerMode == ScannerTriggerMode.live;
     final useUnified = _usesUnifiedCameraView;
+    final cameraGranted = _isCameraGranted;
+    final cameraEnabled = _canUseCameraFeatures;
     final strictnessCaption = _strictness == VinScanStrictness.normal
         ? 'Align VIN barcode (Normal • flexible)'
         : 'Align VIN barcode (Strict • exact 17-char)';
+    final cameraDisabledTooltip =
+        _cameraPermissionState == CameraPermissionState.permanentlyDenied
+            ? 'Allow camera access in Settings to enable scanning'
+            : 'Allow camera access to enable scanning';
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor:
+          cameraGranted ? Colors.black : Theme.of(context).colorScheme.surface,
       body: Stack(
         fit: StackFit.expand,
         children: <Widget>[
-          if (useUnified)
+          if (!cameraGranted)
+            CameraFallbackManualView(
+              validator: widget.validator,
+              strictness: _strictness,
+              permissionState: _cameraPermissionState,
+              onSubmitVin: _triggerValidVinLock,
+              onRequestPermission: () => unawaited(_requestCameraPermission()),
+              onOpenSettings: () => unawaited(_openCameraSettings()),
+            )
+          else if (useUnified)
             widget.ocrViewBuilder != null
                 ? widget.ocrViewBuilder!(
                     context,
@@ -750,6 +948,11 @@ class _ScannerScreenState extends State<ScannerScreen>
                         unawaited(_openManualEntrySheet(initialVin: initial)),
                     onSwitchStrictnessToNormal: () =>
                         _setStrictness(VinScanStrictness.normal),
+                    onCameraAvailabilityChanged: (available) {
+                      if (mounted && _isCameraHardwareAvailable != available) {
+                        setState(() => _isCameraHardwareAvailable = available);
+                      }
+                    },
                   )
           else
             // Keep MobileScanner outside ValueListenableBuilder/LayoutBuilder so
@@ -769,6 +972,7 @@ class _ScannerScreenState extends State<ScannerScreen>
               ),
               errorBuilder: (_, error) => CameraPermissionView(
                 error: error,
+                topPadding: 120,
                 onRetryCamera: () => unawaited(_resumeCamera()),
                 onManualEntry: () => unawaited(_openManualEntrySheet()),
               ),
@@ -848,18 +1052,29 @@ class _ScannerScreenState extends State<ScannerScreen>
                             if (useUnified)
                               Padding(
                                 padding: const EdgeInsets.only(right: 8),
-                                child: IconButton.filledTonal(
-                                  onPressed: () => unawaited(_switchCamera()),
-                                  tooltip: 'Switch camera',
-                                  style: IconButton.styleFrom(
-                                    backgroundColor:
-                                        Colors.black.withValues(alpha: 0.66),
-                                    foregroundColor: Colors.white,
+                                child: Tooltip(
+                                  message: cameraEnabled
+                                      ? 'Switch camera'
+                                      : cameraDisabledTooltip,
+                                  child: Opacity(
+                                    opacity: cameraEnabled ? 1.0 : 0.42,
+                                    child: IconButton.filledTonal(
+                                      onPressed: cameraEnabled
+                                          ? () => unawaited(_switchCamera())
+                                          : _showCameraDisabledHint,
+                                      style: IconButton.styleFrom(
+                                        backgroundColor: Colors.black
+                                            .withValues(alpha: 0.66),
+                                        foregroundColor: Colors.white,
+                                      ),
+                                      icon: const Icon(
+                                        Icons.cameraswitch_rounded,
+                                      ),
+                                    ),
                                   ),
-                                  icon: const Icon(Icons.cameraswitch_rounded),
                                 ),
                               )
-                            else
+                            else if (cameraGranted)
                               ValueListenableBuilder<MobileScannerState>(
                                 valueListenable: controller,
                                 builder: (context, scannerState, _) {
@@ -910,8 +1125,12 @@ class _ScannerScreenState extends State<ScannerScreen>
                         if (_supportsOcr)
                           _HudSegmentedPill<ScannerCaptureMode>(
                             selected: _captureMode,
-                            enabled:
-                                !_isSwitchingCameraBackend && !_isScanLocked,
+                            enabled: cameraEnabled &&
+                                !_isSwitchingCameraBackend &&
+                                !_isScanLocked,
+                            isMuted: !cameraEnabled,
+                            disabledTooltip: cameraDisabledTooltip,
+                            onDisabledTap: _showCameraDisabledHint,
                             options: const <
                                 _HudSegmentOption<ScannerCaptureMode>>[
                               _HudSegmentOption<ScannerCaptureMode>(
@@ -931,8 +1150,12 @@ class _ScannerScreenState extends State<ScannerScreen>
                         if (_supportsSnapAndLighting)
                           _HudSegmentedPill<ScannerTriggerMode>(
                             selected: _activeTriggerMode,
-                            enabled:
-                                !_isSwitchingCameraBackend && !_isScanLocked,
+                            enabled: cameraEnabled &&
+                                !_isSwitchingCameraBackend &&
+                                !_isScanLocked,
+                            isMuted: !cameraEnabled,
+                            disabledTooltip: cameraDisabledTooltip,
+                            onDisabledTap: _showCameraDisabledHint,
                             options: const <
                                 _HudSegmentOption<ScannerTriggerMode>>[
                               _HudSegmentOption<ScannerTriggerMode>(
@@ -973,7 +1196,7 @@ class _ScannerScreenState extends State<ScannerScreen>
               ),
             ),
           ),
-          if (!useUnified)
+          if (cameraGranted && !useUnified)
             ValueListenableBuilder<MobileScannerState>(
               valueListenable: controller,
               builder: (context, scannerState, _) {
@@ -1019,71 +1242,94 @@ class _HudSegmentedPill<T> extends StatelessWidget {
     required this.options,
     required this.onChanged,
     this.enabled = true,
+    this.isMuted = false,
+    this.disabledTooltip,
+    this.onDisabledTap,
   });
 
   final T selected;
   final List<_HudSegmentOption<T>> options;
   final ValueChanged<T> onChanged;
   final bool enabled;
+  final bool isMuted;
+  final String? disabledTooltip;
+  final VoidCallback? onDisabledTap;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.72),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.18),
+    final pill = Opacity(
+      opacity: isMuted ? 0.44 : 1.0,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.72),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.18),
+          ),
         ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(3),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: options.map((option) {
-            final isSelected = option.value == selected;
-            return Material(
-              color: isSelected ? colorScheme.primary : Colors.transparent,
-              borderRadius: BorderRadius.circular(18),
-              child: InkWell(
-                onTap: enabled ? () => onChanged(option.value) : null,
+        child: Padding(
+          padding: const EdgeInsets.all(3),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: options.map((option) {
+              final isSelected = option.value == selected;
+              final selectedBg = isMuted
+                  ? Colors.white.withValues(alpha: 0.22)
+                  : colorScheme.primary;
+              final selectedFg = isMuted ? Colors.white70 : colorScheme.onPrimary;
+              return Material(
+                color: isSelected ? selectedBg : Colors.transparent,
                 borderRadius: BorderRadius.circular(18),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      Icon(
-                        option.icon,
-                        size: 14,
-                        color: isSelected
-                            ? colorScheme.onPrimary
-                            : Colors.white.withValues(alpha: 0.85),
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        option.label,
-                        style: TextStyle(
+                child: InkWell(
+                  onTap: enabled
+                      ? () => onChanged(option.value)
+                      : (isMuted ? onDisabledTap : null),
+                  borderRadius: BorderRadius.circular(18),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Icon(
+                          option.icon,
+                          size: 14,
                           color: isSelected
-                              ? colorScheme.onPrimary
-                              : Colors.white.withValues(alpha: 0.9),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
+                              ? selectedFg
+                              : Colors.white.withValues(alpha: 0.85),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 4),
+                        Text(
+                          option.label,
+                          style: TextStyle(
+                            color: isSelected
+                                ? selectedFg
+                                : Colors.white.withValues(alpha: 0.9),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            );
-          }).toList(growable: false),
+              );
+            }).toList(growable: false),
+          ),
         ),
       ),
     );
+
+    if (isMuted && disabledTooltip != null) {
+      return Tooltip(
+        message: disabledTooltip!,
+        child: pill,
+      );
+    }
+    return pill;
   }
 }
