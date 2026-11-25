@@ -222,3 +222,4 @@ app.*.symbols
 /.agent-shell/
 
 **/.vscode
+.kotlin/

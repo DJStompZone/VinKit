@@ -29,7 +29,7 @@ class TextDetector(
         private const val BOX_THRESH = 0.6f
         private const val UNCLIP_RATIO = 1.5f
         private const val MIN_SIZE = 3
-        private const val MAX_CANDIDATES = 1000
+        private const val MAX_CANDIDATES = 120
         private const val EPSILON = 1e-6f
     }
 

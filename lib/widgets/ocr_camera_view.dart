@@ -10,6 +10,7 @@ import 'package:mobile_scanner/mobile_scanner.dart'
 import 'package:permission_handler/permission_handler.dart';
 import 'package:vinkit_app/services/camera_permission_service.dart';
 import 'package:vinkit_app/services/ocr_image_preprocessor.dart';
+import 'package:vinkit_app/services/vin_frame_assembler.dart';
 import 'package:vinkit_app/services/vin_ocr_service.dart';
 import 'package:vinkit_app/services/vin_validator.dart';
 import 'package:vinkit_app/widgets/camera_fallback_manual_view.dart';
@@ -94,6 +95,10 @@ class _OcrCameraViewState extends State<OcrCameraView>
   static const Duration _liveBarcodeCooldown = Duration(milliseconds: 180);
   static const Duration _liveOcrCooldown = Duration(milliseconds: 750);
   static const Duration _fallbackCaptureInterval = Duration(milliseconds: 1100);
+  static const String _liveOcrRequestId = 'live_ocr';
+
+  late final VinFrameAssembler _vinAssembler;
+  VinAssemblyProgress? _assemblyProgress;
 
   CameraController? _cameraController;
   List<CameraDescription> _cameras = const <CameraDescription>[];
@@ -142,11 +147,21 @@ class _OcrCameraViewState extends State<OcrCameraView>
   @override
   void initState() {
     super.initState();
+    _vinAssembler = VinFrameAssembler(validator: widget.validator);
     WidgetsBinding.instance.addObserver(this);
     widget.switchCameraSignal?.addListener(_onSwitchCameraRequested);
     unawaited(_initializeCamera());
     if (!widget.isBarcodeMode) {
       unawaited(_ensureModelsReady());
+    }
+  }
+
+  void _resetAssemblyProgress() {
+    _vinAssembler.reset();
+    if (_assemblyProgress != null && mounted) {
+      setState(() => _assemblyProgress = null);
+    } else {
+      _assemblyProgress = null;
     }
   }
 
@@ -162,6 +177,13 @@ class _OcrCameraViewState extends State<OcrCameraView>
         oldWidget.isContinuous != widget.isContinuous ||
         oldWidget.strictness != widget.strictness) {
       _clearStatusMessage();
+      _resetAssemblyProgress();
+      if (oldWidget.isContinuous && !widget.isContinuous ||
+          !oldWidget.isBarcodeMode && widget.isBarcodeMode) {
+        unawaited(
+          widget.ocrService.cancelPendingRecognition(_liveOcrRequestId),
+        );
+      }
       if (!widget.isBarcodeMode && !_isModelReady) {
         unawaited(_ensureModelsReady());
       }
@@ -174,10 +196,11 @@ class _OcrCameraViewState extends State<OcrCameraView>
 
     if (oldWidget.isPaused != widget.isPaused) {
       if (widget.isPaused) {
-        unawaited(_stopContinuousCapture(controller));
-        if (!_isProcessingFrame) {
-          unawaited(_pausePreviewSafely(controller));
-        }
+        _resetAssemblyProgress();
+        unawaited(
+          widget.ocrService.cancelPendingRecognition(_liveOcrRequestId),
+        );
+        unawaited(_pauseForWidgetUpdate(controller));
       } else {
         unawaited(_resumeAfterPause(controller));
       }
@@ -186,16 +209,32 @@ class _OcrCameraViewState extends State<OcrCameraView>
 
     if (oldWidget.isContinuous != widget.isContinuous ||
         oldWidget.isBarcodeMode != widget.isBarcodeMode) {
-      unawaited(_syncContinuousCapture(controller));
+      unawaited(
+        _enqueueCameraOp(() => _syncContinuousCapture(controller)),
+      );
     }
   }
 
-  Future<void> _resumeAfterPause(CameraController controller) async {
-    await _resumePreviewSafely(controller);
-    if (!mounted || _cameraController != controller || widget.isPaused) {
-      return;
-    }
-    await _syncContinuousCapture(controller);
+  Future<void> _pauseForWidgetUpdate(CameraController controller) {
+    return _enqueueCameraOp(() async {
+      await _stopContinuousCapture(controller);
+      if (!mounted || _cameraController != controller || !widget.isPaused) {
+        return;
+      }
+      if (!_isProcessingFrame) {
+        await _pausePreviewSafely(controller);
+      }
+    });
+  }
+
+  Future<void> _resumeAfterPause(CameraController controller) {
+    return _enqueueCameraOp(() async {
+      await _resumePreviewSafely(controller);
+      if (!mounted || _cameraController != controller || widget.isPaused) {
+        return;
+      }
+      await _syncContinuousCapture(controller);
+    });
   }
 
   void _onSwitchCameraRequested() {
@@ -239,6 +278,8 @@ class _OcrCameraViewState extends State<OcrCameraView>
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
       _isAppForeground = false;
+      _resetAssemblyProgress();
+      unawaited(widget.ocrService.cancelPendingRecognition(_liveOcrRequestId));
       unawaited(_disposeCamera());
     } else if (state == AppLifecycleState.resumed) {
       _isAppForeground = true;
@@ -727,8 +768,10 @@ class _OcrCameraViewState extends State<OcrCameraView>
     // Copy luma bytes synchronously before the native ImageProxy is recycled.
     final lumaCopy = Uint8List.fromList(yPlane.bytes);
     final rotationDegrees = _computeSensorRotationDegrees(controller);
-    final viewportSize = _lastViewportSize ?? MediaQuery.sizeOf(context);
-    final cropRect = _computeNormalizedCropRect(viewportSize);
+    final viewportSize = _lastViewportSize ??
+        (mounted ? MediaQuery.maybeSizeOf(context) : null);
+    final cropRect =
+        viewportSize != null ? _computeNormalizedCropRect(viewportSize) : null;
 
     _isProcessingFrame = true;
     unawaited(
@@ -785,6 +828,14 @@ class _OcrCameraViewState extends State<OcrCameraView>
       }
       _lastFrameFinishedAt = DateTime.now();
       _isProcessingFrame = false;
+      if (mounted && widget.isPaused) {
+        final activeController = _cameraController;
+        if (activeController != null && activeController.value.isInitialized) {
+          unawaited(
+            _enqueueCameraOp(() => _pausePreviewSafely(activeController)),
+          );
+        }
+      }
     }
   }
 
@@ -1064,12 +1115,73 @@ class _OcrCameraViewState extends State<OcrCameraView>
     String imagePath, {
     required bool isManualSnap,
   }) async {
-    final ocrResult = await widget.ocrService.recognizeText(imagePath);
+    final ocrResult = await widget.ocrService.recognizeText(
+      imagePath,
+      requestId: isManualSnap ? null : _liveOcrRequestId,
+    );
     if (!mounted || widget.isPaused) {
       return;
     }
 
     final lines = ocrResult.orderedLines;
+
+    // Live OCR mode: accumulate partial / glare-obstructed reads across frames
+    // via VinFrameAssembler (while still locking clean single-frame VINs right away).
+    if (!isManualSnap && widget.isContinuous && !widget.isBarcodeMode) {
+      final assembled = _vinAssembler.addFrame(
+        ocrResult,
+        strictness: widget.strictness,
+      );
+      if (assembled.vin != null) {
+        _resetAssemblyProgress();
+        _clearStatusMessage();
+        widget.onVinRecognized(assembled.vin!);
+        return;
+      }
+
+      if (mounted) {
+        setState(() => _assemblyProgress = assembled.progress);
+      }
+
+      // If Strict mode missed a VIN that Normal mode can recover in this frame,
+      // offer the 1-tap switch when not already showing an active assembly strip.
+      if (assembled.progress == null &&
+          widget.strictness == VinScanStrictness.strict &&
+          widget.onSwitchStrictnessToNormal != null) {
+        final normalFallback = widget.validator.extractFromOcrText(
+          lines,
+          strictness: VinScanStrictness.normal,
+        );
+        if (normalFallback.vin != null) {
+          _setTransientBanner(
+            'Possible VIN (${normalFallback.vin}) needs Normal mode',
+            isError: true,
+            actionLabel: 'Use Normal',
+            onAction: () {
+              widget.onSwitchStrictnessToNormal?.call();
+              widget.onVinRecognized(normalFallback.vin!);
+            },
+            autoClearAfter: const Duration(seconds: 4),
+          );
+          return;
+        }
+      }
+
+      if (assembled.progress == null) {
+        final snippet = assembled.bestSnippet;
+        if (snippet != null && snippet.isNotEmpty) {
+          _setTransientBanner(
+            'Partial read: $snippet',
+            isError: true,
+            actionLabel: 'Edit',
+            onAction: () => widget.onManualEntryTap(snippet),
+            autoClearAfter: const Duration(seconds: 3),
+          );
+        }
+      }
+      return;
+    }
+
     final extraction = widget.validator.extractFromOcrText(
       lines,
       strictness: widget.strictness,
@@ -1264,6 +1376,8 @@ class _OcrCameraViewState extends State<OcrCameraView>
   void dispose() {
     _transientStatusTimer?.cancel();
     _fallbackContinuousTimer?.cancel();
+    _vinAssembler.reset();
+    unawaited(widget.ocrService.cancelPendingRecognition(_liveOcrRequestId));
     widget.switchCameraSignal?.removeListener(_onSwitchCameraRequested);
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_disposeCamera());
@@ -1396,6 +1510,11 @@ class _OcrCameraViewState extends State<OcrCameraView>
           statusIsError: _statusMessage != null ? _statusIsError : true,
           statusActionLabel: _statusActionLabel,
           onStatusAction: _statusAction,
+          assemblyProgress: (!widget.isBarcodeMode && widget.isContinuous)
+              ? _assemblyProgress
+              : null,
+          onResetAssembly: _resetAssemblyProgress,
+          onEditAssembly: (partial) => widget.onManualEntryTap(partial),
         ),
         Align(
           alignment: Alignment.bottomCenter,

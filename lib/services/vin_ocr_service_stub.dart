@@ -21,12 +21,18 @@ class UnsupportedVinOcrService implements VinOcrService {
   }
 
   @override
-  Future<VinOcrResult> recognizeText(String imagePath) async {
+  Future<VinOcrResult> recognizeText(
+    String imagePath, {
+    String? requestId,
+  }) async {
     throw const VinOcrException(
       'On-device OCR is only available on Android and iOS.',
       code: 'UNSUPPORTED_PLATFORM',
     );
   }
+
+  @override
+  Future<void> cancelPendingRecognition(String requestId) async {}
 
   @override
   Future<void> deleteTempImage(String imagePath) async {}

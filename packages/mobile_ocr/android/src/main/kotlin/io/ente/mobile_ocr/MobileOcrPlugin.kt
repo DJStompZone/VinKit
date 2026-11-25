@@ -38,7 +38,10 @@ class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
   private lateinit var context: Context
   private var ocrProcessor: OcrProcessor? = null
   private var textRegionDetector: TextRegionDetector? = null
-  private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+  private val scopeExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+    Log.e(TAG, "Unhandled OCR coroutine failure", throwable)
+  }
+  private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob() + scopeExceptionHandler)
   private lateinit var modelManager: ModelManager
   private var cachedModelFiles: ModelFiles? = null
   private val modelMutex = Mutex()
@@ -191,6 +194,9 @@ class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
             result.success(ocrResult)
           } catch (e: CancellationException) {
             result.error("CANCELLED", "OCR request was cancelled", null)
+          } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "OCR ran out of memory for $imagePath", e)
+            result.error("OUT_OF_MEMORY", "OCR ran out of memory processing frame", null)
           } catch (e: Exception) {
             Log.e(TAG, "OCR processing failed for $imagePath", e)
             respondWithError(result, e, "RECOGNITION_ERROR")
@@ -213,6 +219,9 @@ class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
             result.success(regionResult)
           } catch (e: CancellationException) {
             result.error("CANCELLED", "OCR request was cancelled", null)
+          } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "Text region detection ran out of memory for $imagePath", e)
+            result.error("OUT_OF_MEMORY", "OCR ran out of memory processing frame", null)
           } catch (e: Exception) {
             Log.e(TAG, "Text region detection failed for $imagePath", e)
             respondWithError(result, e, "DETECTION_ERROR")
@@ -263,6 +272,9 @@ class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
                 "bestRec=$bestRecognition matchedScore=$matchedDetectionScore"
             )
             result.success(detectionSummary.hasText)
+          } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "Quick detection ran out of memory for $imagePath", e)
+            result.error("OUT_OF_MEMORY", "OCR ran out of memory processing frame", null)
           } catch (e: Exception) {
             Log.e(TAG, "Quick detection failed for $imagePath", e)
             respondWithError(result, e, "DETECTION_ERROR")
@@ -402,7 +414,9 @@ class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
         "imageHeight" to imageHeight
       )
     } finally {
-      activeTasks.decrementAndGet()
+      if (activeTasks.decrementAndGet() == 0 && shuttingDown) {
+        releaseNativeResourcesSafely()
+      }
     }
   }
 
@@ -443,7 +457,9 @@ class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
         }
       }
     } finally {
-      activeTasks.decrementAndGet()
+      if (activeTasks.decrementAndGet() == 0 && shuttingDown) {
+        releaseNativeResourcesSafely()
+      }
     }
   }
 
@@ -498,7 +514,9 @@ class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
         }
       }
     } finally {
-      activeTasks.decrementAndGet()
+      if (activeTasks.decrementAndGet() == 0 && shuttingDown) {
+        releaseNativeResourcesSafely()
+      }
     }
   }
 
@@ -686,20 +704,34 @@ class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
           delay(50)
         }
       }
+      if (activeTasks.get() == 0) {
+        releaseNativeResourcesSafely()
+      } else {
+        Log.w(TAG, "Deferring ONNX resource cleanup while ${activeTasks.get()} task(s) unwind")
+      }
+    }
+    activeRequests.clear()
+    displayableImageCache.clear()
+  }
+
+  private suspend fun releaseNativeResourcesSafely() {
+    withContext(NonCancellable) {
       processorMutex.withLock {
-        ocrProcessor?.close()
-        ocrProcessor = null
+        if (activeTasks.get() == 0) {
+          ocrProcessor?.close()
+          ocrProcessor = null
+        }
       }
       regionDetectorMutex.withLock {
-        textRegionDetector?.close()
-        textRegionDetector = null
+        if (activeTasks.get() == 0) {
+          textRegionDetector?.close()
+          textRegionDetector = null
+        }
       }
       modelMutex.withLock {
         cachedModelFiles = null
       }
     }
-    activeRequests.clear()
-    displayableImageCache.clear()
   }
 
   private suspend fun getModelFiles(): ModelFiles {

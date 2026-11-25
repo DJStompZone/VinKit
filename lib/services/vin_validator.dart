@@ -556,6 +556,13 @@ class VinValidator {
 
     // Normal OCR mode: normalize forbidden VIN letters (I -> 1, O/Q -> 0)
     // because real VINs never contain I, O, or Q.
+    // Guard against English sticker prose (e.g. "CONFORMS TO FEDERAL SAFETY")
+    // turning into fake VINs solely through I->1 / O->0 substitutions.
+    final rawDigits = _countDigits(upperRaw);
+    if (rawDigits < 2) {
+      return;
+    }
+
     final normalized = _normalizeOcrForbiddenChars(upperRaw)
         .replaceAll(_nonAlphanumericPattern, '');
     trackSnippet(normalized);
@@ -577,15 +584,21 @@ class VinValidator {
 
       final positionBonus =
           baseBonus + (normalized.length == vinLength ? 25 : (i == 0 ? 10 : 0));
+      final hasStrongStructure = _validModelYearChars.contains(window[9]) &&
+          _countDigits(window.substring(11)) >= 3;
 
       if (hasValidCheckDigit(window)) {
-        consider(window, bonus: positionBonus + 30);
+        if (normalized.length == vinLength || hasStrongStructure) {
+          consider(window, bonus: positionBonus + 30);
+        }
         continue;
       }
 
       // Try single-character OCR confusion repair verified by ISO 3779 check digit.
       final repaired = _repairSingleOcrChar(window);
-      if (repaired != null) {
+      if (repaired != null &&
+          _validModelYearChars.contains(repaired[9]) &&
+          _countDigits(repaired.substring(11)) >= 3) {
         consider(repaired, bonus: positionBonus + 10, repaired: true);
         continue;
       }

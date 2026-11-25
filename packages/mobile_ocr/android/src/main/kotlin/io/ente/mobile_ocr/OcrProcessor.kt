@@ -78,11 +78,14 @@ class OcrProcessor(
         private const val LOW_CONFIDENCE_THRESHOLD = 0.65f
         private const val DEBUG_TAG = "OnnxOcrDebug"
         private const val QUICK_CHECK_MAX_CANDIDATES = 3
+        private const val MAX_TEXT_REGIONS = 48
     }
 
     private val ortEnv = OrtEnvironment.getEnvironment()
     private val sessionOptions = OrtSession.SessionOptions().apply {
         setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+        setCPUArenaAllocator(false)
+        setIntraOpNumThreads(2)
     }
 
     private lateinit var detectionSession: OrtSession
@@ -120,11 +123,24 @@ class OcrProcessor(
     ): OcrResult {
         val checkCancellation = { cancellationSignal?.ensureActive() }
         // Step 1: Text Detection
-        val detectionResult = detectText(bitmap, cancellationSignal)
+        val rawDetections = detectText(bitmap, cancellationSignal)
         checkCancellation()
 
-        if (detectionResult.isEmpty()) {
+        if (rawDetections.isEmpty()) {
             return OcrResult(emptyList(), emptyList(), emptyList(), emptyList())
+        }
+
+        // Bound simultaneous text crops to prevent OOM on cluttered frames,
+        // keeping the largest regions in their original reading order.
+        val detectionResult = if (rawDetections.size > MAX_TEXT_REGIONS) {
+            rawDetections
+                .withIndex()
+                .sortedByDescending { (_, box) -> estimateBoxArea(box) }
+                .take(MAX_TEXT_REGIONS)
+                .sortedBy { it.index }
+                .map { it.value }
+        } else {
+            rawDetections
         }
 
         val croppedImages = mutableListOf<Bitmap>()
@@ -387,6 +403,21 @@ class OcrProcessor(
     private fun cropTextRegion(bitmap: Bitmap, box: TextBox): Bitmap {
         val orderedPoints = ImageUtils.orderPointsClockwise(box.points)
         return ImageUtils.cropTextRegion(bitmap, orderedPoints)
+    }
+
+    private fun estimateBoxArea(box: TextBox): Float {
+        if (box.points.isEmpty()) return 0f
+        var minX = Float.POSITIVE_INFINITY
+        var maxX = Float.NEGATIVE_INFINITY
+        var minY = Float.POSITIVE_INFINITY
+        var maxY = Float.NEGATIVE_INFINITY
+        for (point in box.points) {
+            if (point.x < minX) minX = point.x
+            if (point.x > maxX) maxX = point.x
+            if (point.y < minY) minY = point.y
+            if (point.y > maxY) maxY = point.y
+        }
+        return ((maxX - minX).coerceAtLeast(0f)) * ((maxY - minY).coerceAtLeast(0f))
     }
 
     private fun classifyAndRotateIndices(

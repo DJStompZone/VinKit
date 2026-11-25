@@ -29,6 +29,8 @@ class TextRecognizer(
         private const val IMG_WIDTH = 320
         private const val BATCH_SIZE = 6
         private const val MIN_SPAN_RATIO = 1e-3f
+        private const val MAX_WH_RATIO = 25f
+        private const val MAX_TARGET_WIDTH = 1200
     }
 
     fun recognize(images: List<Bitmap>): List<RecognitionResult> {
@@ -36,7 +38,7 @@ class TextRecognizer(
             return emptyList()
         }
 
-        val widthList = images.map { it.width.toFloat() / it.height }
+        val widthList = images.map { it.width.toFloat() / it.height.coerceAtLeast(1) }
         val sortedIndices = widthList.indices.sortedBy { widthList[it] }
         val orderedResults = MutableList(images.size) {
             RecognitionResult("", 0f, emptyList())
@@ -60,16 +62,18 @@ class TextRecognizer(
     private fun processBatch(batchImages: List<Bitmap>): List<RecognitionResult> {
         if (batchImages.isEmpty()) return emptyList()
 
-        // Calculate max width-height ratio for the batch (baseline ratio aligns with Python implementation)
+        // Calculate max width-height ratio for the batch, capped to prevent
+        // extreme aspect-ratio false detections from causing OOM allocations.
         var maxWhRatio = IMG_WIDTH.toFloat() / IMG_HEIGHT
         for (image in batchImages) {
-            val ratio = image.width.toFloat() / image.height
+            val safeHeight = image.height.coerceAtLeast(1)
+            val ratio = (image.width.toFloat() / safeHeight).coerceAtMost(MAX_WH_RATIO)
             if (ratio > maxWhRatio) {
                 maxWhRatio = ratio
             }
         }
 
-        val targetWidth = ceil(IMG_HEIGHT * maxWhRatio).toInt().coerceAtLeast(1)
+        val targetWidth = ceil(IMG_HEIGHT * maxWhRatio).toInt().coerceIn(1, MAX_TARGET_WIDTH)
 
         // Prepare batch input
         val batchSize = batchImages.size
@@ -108,7 +112,8 @@ class TextRecognizer(
         targetWidth: Int
     ): Int {
         // Calculate resize dimensions maintaining aspect ratio
-        val aspectRatio = bitmap.width.toFloat() / bitmap.height
+        val safeHeight = bitmap.height.coerceAtLeast(1)
+        val aspectRatio = (bitmap.width.toFloat() / safeHeight).coerceAtMost(MAX_WH_RATIO)
         val resizedWidth = min(
             ceil(IMG_HEIGHT * aspectRatio).toInt().coerceAtLeast(1),
             targetWidth
@@ -157,28 +162,36 @@ class TextRecognizer(
     }
 
     private fun decodeOutput(output: OnnxTensor, batchSize: Int, contentWidths: IntArray, targetWidth: Int): List<RecognitionResult> {
-        val outputArray = ImageUtils.toFloatArray(output.floatBuffer)
+        val buffer = output.floatBuffer.duplicate()
+        buffer.rewind()
         val shape = output.info.shape
         val seqLen = shape[1].toInt()
         val vocabSize = shape[2].toInt()
+        if (seqLen <= 0 || vocabSize <= 0) {
+            return List(batchSize) { RecognitionResult("", 0f, emptyList()) }
+        }
 
+        // Stream one timestep row at a time from the native FloatBuffer instead of
+        // copying the entire [batchSize, seqLen, vocabSize] tensor onto the Java heap.
+        val rowBuffer = FloatArray(vocabSize)
         val results = mutableListOf<RecognitionResult>()
 
         for (b in 0 until batchSize) {
-            val batchOffset = b * seqLen * vocabSize
-
             // Get argmax and probabilities for each time step
             val charIndices = IntArray(seqLen)
             val probs = FloatArray(seqLen)
 
             for (t in 0 until seqLen) {
-                val timeOffset = batchOffset + t * vocabSize
+                if (buffer.remaining() < vocabSize) {
+                    break
+                }
+                buffer.get(rowBuffer)
 
-                var maxProb = outputArray[timeOffset]
+                var maxProb = rowBuffer[0]
                 var maxIndex = 0
 
                 for (c in 1 until vocabSize) {
-                    val prob = outputArray[timeOffset + c]
+                    val prob = rowBuffer[c]
                     if (prob > maxProb) {
                         maxProb = prob
                         maxIndex = c

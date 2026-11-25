@@ -68,7 +68,10 @@ class MobileVinOcrService implements VinOcrService {
   }
 
   @override
-  Future<VinOcrResult> recognizeText(String imagePath) async {
+  Future<VinOcrResult> recognizeText(
+    String imagePath, {
+    String? requestId,
+  }) async {
     if (!isSupported) {
       throw const VinOcrException(
         'On-device OCR is only available on Android and iOS.',
@@ -79,6 +82,7 @@ class MobileVinOcrService implements VinOcrService {
       final detection = await _plugin.detectText(
         imagePath: imagePath,
         includeAllConfidenceScores: true,
+        requestId: requestId,
       );
       final blocks = detection.blocks
           .map(
@@ -116,6 +120,18 @@ class MobileVinOcrService implements VinOcrService {
         'OCR could not process this capture. Try steadier framing or adjusting lighting.',
         code: 'UNEXPECTED_ERROR',
       );
+    }
+  }
+
+  @override
+  Future<void> cancelPendingRecognition(String requestId) async {
+    if (!isSupported) {
+      return;
+    }
+    try {
+      await _plugin.cancelRequest(requestId);
+    } catch (_) {
+      // Ignore cancellation errors if no request is active or engine is detaching.
     }
   }
 

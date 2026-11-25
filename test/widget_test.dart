@@ -15,6 +15,7 @@ import 'package:vinkit_app/screens/scanner_screen.dart';
 import 'package:vinkit_app/screens/vehicle_result_screen.dart';
 import 'package:vinkit_app/services/camera_permission_service.dart';
 import 'package:vinkit_app/services/scanner_feedback_service.dart';
+import 'package:vinkit_app/services/vin_frame_assembler.dart';
 import 'package:vinkit_app/services/vin_lookup_controller.dart';
 import 'package:vinkit_app/services/vin_lookup_service.dart';
 import 'package:vinkit_app/services/vin_ocr_service.dart';
@@ -92,13 +93,19 @@ class _FakeOcrService implements VinOcrService {
   Future<void> prepareModels() async {}
 
   @override
-  Future<VinOcrResult> recognizeText(String imagePath) async {
+  Future<VinOcrResult> recognizeText(
+    String imagePath, {
+    String? requestId,
+  }) async {
     return const VinOcrResult(
       blocks: <VinOcrTextBlock>[
         VinOcrTextBlock(text: 'VIN: 1FM5K8GCXNGA77516', confidence: 0.96),
       ],
     );
   }
+
+  @override
+  Future<void> cancelPendingRecognition(String requestId) async {}
 
   @override
   Future<void> deleteTempImage(String imagePath) async {}
@@ -1049,6 +1056,54 @@ void main() {
         await tester.tap(find.text('Open Settings'));
         await tester.pump();
         expect(permissions.openSettingsCount, 1);
+      },
+    );
+
+    testWidgets(
+      'ScannerOverlay renders live 17-slot VIN assembly strip with Edit and Reset actions',
+      (tester) async {
+        var resetCount = 0;
+        String? editedPartial;
+        const progress = VinAssemblyProgress(
+          slots: <String?>[
+            '1', 'H', 'G', 'C', 'M', '8', '2', null, null,
+            '3', 'A', '0', '0', '4', '3', '5', '2',
+          ],
+          confirmedSlots: <bool>[
+            true, true, true, true, true, true, true, false, false,
+            true, true, true, true, false, false, false, false,
+          ],
+          filledCount: 15,
+          confirmedCount: 11,
+          bestPartialText: '1HGCM823A004352',
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.darkTheme,
+            home: Scaffold(
+              body: ScannerOverlay(
+                scanWindow: const Rect.fromLTWH(24, 180, 320, 96),
+                isPaused: false,
+                assemblyProgress: progress,
+                onResetAssembly: () => resetCount++,
+                onEditAssembly: (value) => editedPartial = value,
+              ),
+            ),
+          ),
+        );
+
+        expect(find.text('Assembling VIN (15/17)'), findsOneWidget);
+        expect(find.text('Edit'), findsOneWidget);
+        expect(find.text('_'), findsNWidgets(2));
+
+        await tester.tap(find.text('Edit'));
+        await tester.pump();
+        expect(editedPartial, '1HGCM823A004352');
+
+        await tester.tap(find.byTooltip('Clear assembled VIN'));
+        await tester.pump();
+        expect(resetCount, 1);
       },
     );
   });

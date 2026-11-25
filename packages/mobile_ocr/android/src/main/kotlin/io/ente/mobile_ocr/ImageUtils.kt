@@ -28,15 +28,17 @@ object ImageUtils {
         }
 
         // Calculate dimensions of the cropped region
-        // Use maximum of opposing sides to avoid truncation (matching Python implementation)
+        // Use maximum of opposing sides to avoid truncation (matching Python implementation),
+        // bounded to prevent extreme malformed polygons from causing OOM allocations.
+        val maxCropDimension = 2048
         val width = max(
             distance(points[0], points[1]),  // top edge
             distance(points[2], points[3])   // bottom edge
-        ).toInt().coerceAtLeast(1)
+        ).toInt().coerceIn(1, maxCropDimension)
         val height = max(
             distance(points[0], points[3]),  // left edge
             distance(points[1], points[2])   // right edge
-        ).toInt().coerceAtLeast(1)
+        ).toInt().coerceIn(1, maxCropDimension)
 
         // Create destination points for perspective transform
         val dstPoints = floatArrayOf(
@@ -71,7 +73,7 @@ object ImageUtils {
             val rotationMatrix = Matrix().apply {
                 postRotate(90f)
             }
-            return Bitmap.createBitmap(
+            val rotatedBitmap = Bitmap.createBitmap(
                 croppedBitmap,
                 0,
                 0,
@@ -80,6 +82,10 @@ object ImageUtils {
                 rotationMatrix,
                 true
             )
+            if (rotatedBitmap !== croppedBitmap && !croppedBitmap.isRecycled) {
+                croppedBitmap.recycle()
+            }
+            return rotatedBitmap
         }
 
         return croppedBitmap

@@ -155,7 +155,14 @@ abstract interface class VinOcrService {
   Future<void> prepareModels();
 
   /// Runs on-device text recognition on the JPEG/PNG image at [imagePath].
-  Future<VinOcrResult> recognizeText(String imagePath);
+  ///
+  /// Passing [requestId] allows cancelling an in-flight native OCR request via
+  /// [cancelPendingRecognition] (and replaces any prior request with the same ID).
+  Future<VinOcrResult> recognizeText(String imagePath, {String? requestId});
+
+  /// Best-effort cancellation of an in-flight native OCR request started with
+  /// [requestId].
+  Future<void> cancelPendingRecognition(String requestId);
 
   /// Best-effort deletion of a temporary captured camera file at [imagePath].
   Future<void> deleteTempImage(String imagePath);

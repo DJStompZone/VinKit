@@ -40,10 +40,16 @@ object CharacterBoxGeometry {
                 val reversedStart = 1f - end
                 val reversedEnd = 1f - start
                 start = reversedStart.coerceIn(0f, 1f)
+                if (start >= 1f - epsilon) {
+                    return@mapNotNull null
+                }
                 end = reversedEnd.coerceIn(start + epsilon, 1f)
             }
 
             val clampedStart = start.coerceIn(0f, 1f)
+            if (clampedStart >= 1f - epsilon) {
+                return@mapNotNull null
+            }
             val clampedEnd = end.coerceIn(clampedStart + epsilon, 1f)
             if (clampedEnd - clampedStart <= epsilon) {
                 return@mapNotNull null

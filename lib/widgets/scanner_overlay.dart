@@ -1,4 +1,5 @@
 import 'package:material_ui/material_ui.dart';
+import 'package:vinkit_app/services/vin_frame_assembler.dart';
 import 'package:vinkit_app/theme/app_theme.dart';
 
 /// Renders a semi-transparent scanner mask with a horizontal VIN cutout,
@@ -15,6 +16,9 @@ class ScannerOverlay extends StatelessWidget {
     this.statusIsError = true,
     this.statusActionLabel,
     this.onStatusAction,
+    this.assemblyProgress,
+    this.onResetAssembly,
+    this.onEditAssembly,
   });
 
   /// Coordinates of the transparent detection/alignment region.
@@ -42,6 +46,16 @@ class ScannerOverlay extends StatelessWidget {
   /// Callback invoked when the status banner's quick-action button is tapped.
   final VoidCallback? onStatusAction;
 
+  /// Optional live multi-frame OCR VIN assembly progress strip shown beneath
+  /// the cutout while piecing together glare-obstructed fragments.
+  final VinAssemblyProgress? assemblyProgress;
+
+  /// Callback invoked to clear the active multi-frame OCR assembly buffer.
+  final VoidCallback? onResetAssembly;
+
+  /// Callback invoked to open manual entry prefilled with assembled characters.
+  final ValueChanged<String>? onEditAssembly;
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -49,6 +63,7 @@ class ScannerOverlay extends StatelessWidget {
     final caption = isPaused
         ? 'Scanner paused'
         : (promptText ?? 'Align VIN barcode inside frame');
+    final showAssemblyStrip = !isPaused && assemblyProgress != null;
 
     return Stack(
       children: <Widget>[
@@ -95,7 +110,21 @@ class ScannerOverlay extends StatelessWidget {
             ),
           ),
         ),
-        if (statusMessage != null)
+        if (showAssemblyStrip)
+          Positioned(
+            top: scanWindow.bottom + 14,
+            left: 16,
+            right: 16,
+            child: Center(
+              child: _VinAssemblyStrip(
+                progress: assemblyProgress!,
+                accentColor: colorScheme.primary,
+                onReset: onResetAssembly,
+                onEdit: onEditAssembly,
+              ),
+            ),
+          )
+        else if (statusMessage != null)
           Positioned(
             top: scanWindow.bottom + 14,
             left: 20,
@@ -163,6 +192,144 @@ class ScannerOverlay extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _VinAssemblyStrip extends StatelessWidget {
+  const _VinAssemblyStrip({
+    required this.progress,
+    required this.accentColor,
+    this.onReset,
+    this.onEdit,
+  });
+
+  final VinAssemblyProgress progress;
+  final Color accentColor;
+  final VoidCallback? onReset;
+  final ValueChanged<String>? onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.80),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(
+          color: Colors.white.withValues(alpha: 0.16),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 10, 10),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Text(
+                  'Assembling VIN (${progress.filledCount}/17)',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.82),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+                if (onEdit != null &&
+                    progress.bestPartialText.isNotEmpty) ...<Widget>[
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: () => onEdit!(progress.bestPartialText),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      backgroundColor: accentColor.withValues(alpha: 0.24),
+                      foregroundColor: Colors.white,
+                    ),
+                    child: const Text(
+                      'Edit',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+                if (onReset != null) ...<Widget>[
+                  const SizedBox(width: 4),
+                  IconButton(
+                    onPressed: onReset,
+                    tooltip: 'Clear assembled VIN',
+                    padding: const EdgeInsets.all(2),
+                    constraints: const BoxConstraints(
+                      minWidth: 24,
+                      minHeight: 24,
+                    ),
+                    icon: Icon(
+                      Icons.refresh_rounded,
+                      size: 15,
+                      color: Colors.white.withValues(alpha: 0.72),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 6),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: List<Widget>.generate(17, (index) {
+                  final char = progress.slots[index];
+                  final isConfirmed = progress.confirmedSlots[index];
+                  final hasChar = char != null;
+                  return Container(
+                    width: 17,
+                    height: 24,
+                    margin: const EdgeInsets.symmetric(horizontal: 1),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: isConfirmed
+                          ? accentColor.withValues(alpha: 0.28)
+                          : hasChar
+                              ? Colors.white.withValues(alpha: 0.12)
+                              : Colors.white.withValues(alpha: 0.04),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                        color: isConfirmed
+                            ? accentColor.withValues(alpha: 0.75)
+                            : hasChar
+                                ? Colors.white.withValues(alpha: 0.28)
+                                : Colors.white.withValues(alpha: 0.12),
+                        width: 0.9,
+                      ),
+                    ),
+                    child: Text(
+                      char ?? '_',
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 12,
+                        fontWeight:
+                            isConfirmed ? FontWeight.w800 : FontWeight.w600,
+                        color: isConfirmed
+                            ? Colors.white
+                            : hasChar
+                                ? Colors.white.withValues(alpha: 0.78)
+                                : Colors.white.withValues(alpha: 0.30),
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
