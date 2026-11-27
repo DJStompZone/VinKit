@@ -46,6 +46,11 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+            // R8 is on for release builds; keep ONNX Runtime's JNI-visible classes intact.
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 }
