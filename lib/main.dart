@@ -1,5 +1,6 @@
 import 'package:material_ui/material_ui.dart';
 import 'package:vinkit_app/screens/scanner_screen.dart';
+import 'package:vinkit_app/services/crash_reporting_service.dart';
 import 'package:vinkit_app/services/scanner_feedback_service.dart';
 import 'package:vinkit_app/services/stomp_zone_vin_service.dart';
 import 'package:vinkit_app/services/vin_lookup_controller.dart';
@@ -9,14 +10,22 @@ import 'package:vinkit_app/services/vin_validator.dart';
 import 'package:vinkit_app/theme/app_theme.dart';
 import 'package:vinkit_app/widgets/startup_splash_overlay.dart';
 
-/// Application entry point initializing Flutter bindings and launching [VinKitApp].
-void main() {
+/// Application entry point initializing Flutter bindings, opt-in Firebase
+/// Crashlytics error reporting, and launching [VinKitApp].
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const VinKitApp());
+  final crashReportingService = CrashReportingService();
+  await crashReportingService.initialize();
+
+  runApp(
+    VinKitApp(
+      crashReportingService: crashReportingService,
+    ),
+  );
 }
 
 /// Root Material 3 application widget configuring themes, startup splash flair,
-/// and VIN services.
+/// opt-in crash diagnostics, and VIN services.
 class VinKitApp extends StatefulWidget {
   /// Creates a [VinKitApp] with optional dependency overrides for testing.
   const VinKitApp({
@@ -25,6 +34,7 @@ class VinKitApp extends StatefulWidget {
     this.validator = const VinValidator(),
     this.feedbackService = const PlatformScannerFeedbackService(),
     this.ocrService,
+    this.crashReportingService,
     this.initialThemeMode = ThemeMode.system,
     this.showStartupSplash = true,
   });
@@ -41,6 +51,9 @@ class VinKitApp extends StatefulWidget {
   /// Optional on-device OCR service override (defaults to `mobile_ocr` on Android/iOS).
   final VinOcrService? ocrService;
 
+  /// Optional opt-in Crashlytics and diagnostic reporting service.
+  final CrashReportingService? crashReportingService;
+
   /// Initial Material theme mode.
   final ThemeMode initialThemeMode;
 
@@ -54,6 +67,8 @@ class VinKitApp extends StatefulWidget {
 class _VinKitAppState extends State<VinKitApp> {
   late final VinLookupService _service;
   late final bool _ownsService;
+  late final CrashReportingService _crashReportingService;
+  late final bool _ownsCrashReportingService;
   late final VinLookupController _vinController;
   late ThemeMode _themeMode;
   late bool _showSplash;
@@ -64,9 +79,13 @@ class _VinKitAppState extends State<VinKitApp> {
     _ownsService = widget.vinLookupService == null;
     _service =
         widget.vinLookupService ?? StompZoneVinService(validator: widget.validator);
+    _ownsCrashReportingService = widget.crashReportingService == null;
+    _crashReportingService =
+        widget.crashReportingService ?? CrashReportingService();
     _vinController = VinLookupController(
       service: _service,
       validator: widget.validator,
+      crashReportingService: _crashReportingService,
     );
     _themeMode = widget.initialThemeMode;
     _showSplash = widget.showStartupSplash;
@@ -82,11 +101,20 @@ class _VinKitAppState extends State<VinKitApp> {
     });
   }
 
+  void _setThemeMode(ThemeMode mode) {
+    if (_themeMode != mode) {
+      setState(() => _themeMode = mode);
+    }
+  }
+
   @override
   void dispose() {
     _vinController.dispose();
     if (_ownsService) {
       _service.dispose();
+    }
+    if (_ownsCrashReportingService) {
+      _crashReportingService.dispose();
     }
     super.dispose();
   }
@@ -107,8 +135,10 @@ class _VinKitAppState extends State<VinKitApp> {
             validator: widget.validator,
             themeMode: _themeMode,
             onCycleThemeMode: _cycleThemeMode,
+            onThemeModeChanged: _setThemeMode,
             feedbackService: widget.feedbackService,
             ocrService: widget.ocrService,
+            crashReportingService: _crashReportingService,
             deferCameraPermissionPrompt: _showSplash,
           ),
           if (_showSplash)

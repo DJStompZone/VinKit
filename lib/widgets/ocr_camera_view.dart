@@ -35,6 +35,7 @@ class OcrCameraView extends StatefulWidget {
     this.isContinuous = false,
     this.onAnalyzeBarcodeImage,
     this.switchCameraSignal,
+    this.resetSignal,
     this.onSwitchStrictnessToNormal,
     this.onCameraAvailabilityChanged,
     this.preprocessor = const OcrImagePreprocessor(),
@@ -66,6 +67,9 @@ class OcrCameraView extends StatefulWidget {
 
   /// Optional monotonic counter incremented when the parent requests switching cameras.
   final ValueListenable<int>? switchCameraSignal;
+
+  /// Optional monotonic counter incremented when the parent resets scanner state/cache.
+  final ValueListenable<int>? resetSignal;
 
   /// Called immediately when barcode or OCR recognizes a valid 17-character VIN.
   final ValueChanged<String> onVinRecognized;
@@ -150,7 +154,29 @@ class _OcrCameraViewState extends State<OcrCameraView>
     _vinAssembler = VinFrameAssembler(validator: widget.validator);
     WidgetsBinding.instance.addObserver(this);
     widget.switchCameraSignal?.addListener(_onSwitchCameraRequested);
+    widget.resetSignal?.addListener(_onResetRequested);
     unawaited(_initializeCamera());
+    if (!widget.isBarcodeMode) {
+      unawaited(_ensureModelsReady());
+    }
+  }
+
+  void _onResetRequested() {
+    _clearStatusMessage();
+    _resetAssemblyProgress();
+    unawaited(widget.ocrService.cancelPendingRecognition(_liveOcrRequestId));
+    if (mounted) {
+      setState(() {
+        _isLightingPanelExpanded = false;
+        _isModelReady = false;
+        _modelError = null;
+      });
+    }
+    unawaited(_resetLighting());
+    unawaited(_setZoomScale(0.0));
+    if (_isTorchOn) {
+      unawaited(_toggleTorch());
+    }
     if (!widget.isBarcodeMode) {
       unawaited(_ensureModelsReady());
     }
@@ -171,6 +197,10 @@ class _OcrCameraViewState extends State<OcrCameraView>
     if (oldWidget.switchCameraSignal != widget.switchCameraSignal) {
       oldWidget.switchCameraSignal?.removeListener(_onSwitchCameraRequested);
       widget.switchCameraSignal?.addListener(_onSwitchCameraRequested);
+    }
+    if (oldWidget.resetSignal != widget.resetSignal) {
+      oldWidget.resetSignal?.removeListener(_onResetRequested);
+      widget.resetSignal?.addListener(_onResetRequested);
     }
 
     if (oldWidget.isBarcodeMode != widget.isBarcodeMode ||
@@ -1379,6 +1409,7 @@ class _OcrCameraViewState extends State<OcrCameraView>
     _vinAssembler.reset();
     unawaited(widget.ocrService.cancelPendingRecognition(_liveOcrRequestId));
     widget.switchCameraSignal?.removeListener(_onSwitchCameraRequested);
+    widget.resetSignal?.removeListener(_onResetRequested);
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_disposeCamera());
     super.dispose();

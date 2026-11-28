@@ -7,6 +7,8 @@ import 'package:material_ui/material_ui.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:vinkit_app/screens/vehicle_result_screen.dart';
 import 'package:vinkit_app/services/camera_permission_service.dart';
+import 'package:vinkit_app/services/crash_reporting_service.dart';
+import 'package:vinkit_app/services/ocr_image_preprocessor.dart';
 import 'package:vinkit_app/services/scanner_feedback_service.dart';
 import 'package:vinkit_app/services/vin_lookup_controller.dart';
 import 'package:vinkit_app/services/vin_ocr_service.dart';
@@ -18,6 +20,7 @@ import 'package:vinkit_app/widgets/manual_vin_sheet.dart';
 import 'package:vinkit_app/widgets/ocr_camera_view.dart';
 import 'package:vinkit_app/widgets/scanner_controls.dart';
 import 'package:vinkit_app/widgets/scanner_overlay.dart';
+import 'package:vinkit_app/widgets/settings_sheet.dart';
 
 /// Active recognition target on [ScannerScreen].
 enum ScannerCaptureMode {
@@ -68,9 +71,12 @@ class ScannerScreen extends StatefulWidget {
     required this.validator,
     required this.themeMode,
     required this.onCycleThemeMode,
+    this.onThemeModeChanged,
     this.feedbackService = const PlatformScannerFeedbackService(),
     this.ocrService,
     this.permissionService,
+    this.crashReportingService,
+    this.imagePreprocessor = const OcrImagePreprocessor(),
     this.deferCameraPermissionPrompt = false,
     this.initialStrictness = VinScanStrictness.normal,
     this.cameraScannerSupportedOverride,
@@ -89,6 +95,9 @@ class ScannerScreen extends StatefulWidget {
   /// Callback cycling between system, light, and dark themes.
   final VoidCallback onCycleThemeMode;
 
+  /// Optional callback setting a specific [ThemeMode] directly from Settings.
+  final ValueChanged<ThemeMode>? onThemeModeChanged;
+
   /// Service playing audible beep and haptic confirmation on valid VIN scans.
   final ScannerFeedbackService feedbackService;
 
@@ -97,6 +106,12 @@ class ScannerScreen extends StatefulWidget {
 
   /// Optional runtime camera permission service override for tests.
   final CameraPermissionService? permissionService;
+
+  /// Optional opt-in crash and diagnostic reporting service.
+  final CrashReportingService? crashReportingService;
+
+  /// Native image preprocessor and cache manager.
+  final OcrImagePreprocessor imagePreprocessor;
 
   /// When `true` (e.g. while the startup splash animation is running), defers
   /// popping up the OS camera permission dialog until the splash finishes.
@@ -149,7 +164,10 @@ class _ScannerScreenState extends State<ScannerScreen>
   MobileScannerController? _scannerController;
   late final VinOcrService _ocrService;
   late final CameraPermissionService _permissionService;
+  late final CrashReportingService _crashReportingService;
+  late final bool _ownsCrashReportingService;
   final ValueNotifier<int> _switchCameraSignal = ValueNotifier<int>(0);
+  final ValueNotifier<int> _resetScannerSignal = ValueNotifier<int>(0);
 
   ScannerCaptureMode _captureMode = ScannerCaptureMode.barcode;
   ScannerTriggerMode _barcodeTriggerMode = ScannerTriggerMode.live;
@@ -219,6 +237,9 @@ class _ScannerScreenState extends State<ScannerScreen>
     _ocrService = widget.ocrService ?? createPlatformVinOcrService();
     _permissionService =
         widget.permissionService ?? const PlatformCameraPermissionService();
+    _ownsCrashReportingService = widget.crashReportingService == null;
+    _crashReportingService =
+        widget.crashReportingService ?? CrashReportingService();
 
     final skipInitialPermissionGate =
         kIsWeb ||
@@ -834,6 +855,133 @@ class _ScannerScreenState extends State<ScannerScreen>
     }
   }
 
+  Map<String, String> _buildScannerDiagnostics() {
+    return <String, String>{
+      'theme_mode': widget.themeMode.name,
+      'capture_mode': _captureMode.name,
+      'trigger_mode': _activeTriggerMode.name,
+      'strictness': _strictness.name,
+      'camera_permission': _cameraPermissionState.name,
+      'camera_hardware_available': _isCameraHardwareAvailable.toString(),
+      'uses_unified_camera': _usesUnifiedCameraView.toString(),
+      'lookup_state': widget.vinController.state.runtimeType.toString(),
+    };
+  }
+
+  Future<int> _resetScannerStateAndCache() async {
+    _clearStatusMessage();
+    widget.vinController.reset();
+    if (mounted) {
+      setState(() {
+        _captureMode = ScannerCaptureMode.barcode;
+        _barcodeTriggerMode = ScannerTriggerMode.live;
+        _ocrTriggerMode = ScannerTriggerMode.snap;
+        _strictness = VinScanStrictness.normal;
+        _zoomScale = 0.0;
+      });
+    }
+    _resetScannerSignal.value++;
+    unawaited(_setZoomScale(0.0));
+    final removedFiles = await widget.imagePreprocessor.clearTempImageCache();
+    unawaited(
+      _crashReportingService.logBreadcrumb(
+        'Reset scanner state and cleared $removedFiles temp cache files',
+      ),
+    );
+    return removedFiles;
+  }
+
+  Future<bool> _resetOcrModelCache() async {
+    final cleared = await widget.imagePreprocessor.clearOcrModelCache();
+    _resetScannerSignal.value++;
+    unawaited(
+      _crashReportingService.logBreadcrumb(
+        'Cleared on-device OCR model cache (cleared=$cleared)',
+      ),
+    );
+    return cleared;
+  }
+
+  Future<CameraPermissionState> _recheckPermissionFromSettings() async {
+    final status = await _permissionService.checkStatus();
+    if (mounted) {
+      setState(() {
+        _cameraPermissionState = status;
+        if (status == CameraPermissionState.granted) {
+          _isCameraHardwareAvailable = true;
+        }
+      });
+    }
+    return status;
+  }
+
+  Future<CameraPermissionState> _requestPermissionFromSettings() async {
+    await _requestCameraPermission();
+    return _cameraPermissionState;
+  }
+
+  Future<void> _openSettingsSheet() async {
+    if (_isScanLocked || !mounted) {
+      return;
+    }
+    setState(() => _isScanLocked = true);
+    if (!_usesUnifiedCameraView) {
+      unawaited(_stopScanning());
+    }
+
+    unawaited(
+      _crashReportingService.updateDiagnosticsContext(_buildScannerDiagnostics()),
+    );
+
+    final supportsNativePerms = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS);
+    final supportsAndroidOcrCache =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => SettingsSheet(
+        crashReportingService: _crashReportingService,
+        themeMode: widget.themeMode,
+        onThemeModeChanged: (mode) {
+          if (widget.onThemeModeChanged != null) {
+            widget.onThemeModeChanged!(mode);
+          } else {
+            widget.onCycleThemeMode();
+          }
+        },
+        strictness: _strictness,
+        onStrictnessChanged: _setStrictness,
+        onResetStateAndCache: _resetScannerStateAndCache,
+        cameraPermissionState:
+            _supportsCameraScanner ? _cameraPermissionState : null,
+        supportsNativePermissions: supportsNativePerms,
+        onRequestCameraPermission:
+            _supportsCameraScanner ? _requestPermissionFromSettings : null,
+        onOpenSystemSettings:
+            supportsNativePerms ? _permissionService.openSettings : null,
+        onRecheckPermissions:
+            _supportsCameraScanner ? _recheckPermissionFromSettings : null,
+        onResetOcrModelCache:
+            supportsAndroidOcrCache ? _resetOcrModelCache : null,
+        extraDiagnostics: _buildScannerDiagnostics(),
+        initialFeedbackVin: widget.vinController.lastVin,
+      ),
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() => _isScanLocked = false);
+    if (!_usesUnifiedCameraView && _isCameraGranted) {
+      await _resumeCamera();
+    }
+  }
+
   IconData _themeIconFor(ThemeMode mode) {
     return switch (mode) {
       ThemeMode.light => Icons.light_mode_rounded,
@@ -854,6 +1002,10 @@ class _ScannerScreenState extends State<ScannerScreen>
   void dispose() {
     _statusTimer?.cancel();
     _switchCameraSignal.dispose();
+    _resetScannerSignal.dispose();
+    if (_ownsCrashReportingService) {
+      _crashReportingService.dispose();
+    }
     WidgetsBinding.instance.removeObserver(this);
     final controller = _scannerController;
     if (controller != null) {
@@ -872,6 +1024,7 @@ class _ScannerScreenState extends State<ScannerScreen>
         onStrictnessChanged: _setStrictness,
         themeMode: widget.themeMode,
         onCycleThemeMode: widget.onCycleThemeMode,
+        onOpenSettings: () => unawaited(_openSettingsSheet()),
         onSubmitVin: _triggerValidVinLock,
       );
     }
@@ -943,6 +1096,8 @@ class _ScannerScreenState extends State<ScannerScreen>
                     isContinuous: isContinuous,
                     onAnalyzeBarcodeImage: _analyzeBarcodeImage,
                     switchCameraSignal: _switchCameraSignal,
+                    resetSignal: _resetScannerSignal,
+                    preprocessor: widget.imagePreprocessor,
                     onVinRecognized: _triggerValidVinLock,
                     onManualEntryTap: (initial) =>
                         unawaited(_openManualEntrySheet(initialVin: initial)),
@@ -1111,6 +1266,18 @@ class _ScannerScreenState extends State<ScannerScreen>
                                 foregroundColor: Colors.white,
                               ),
                               icon: Icon(_themeIconFor(widget.themeMode)),
+                            ),
+                            const SizedBox(width: 8),
+                            IconButton.filledTonal(
+                              key: const Key('open_settings_button'),
+                              onPressed: () => unawaited(_openSettingsSheet()),
+                              tooltip: 'Settings & Diagnostics',
+                              style: IconButton.styleFrom(
+                                backgroundColor:
+                                    Colors.black.withValues(alpha: 0.66),
+                                foregroundColor: Colors.white,
+                              ),
+                              icon: const Icon(Icons.settings_outlined),
                             ),
                           ],
                         ),

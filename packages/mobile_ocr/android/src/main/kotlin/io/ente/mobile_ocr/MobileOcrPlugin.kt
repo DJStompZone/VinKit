@@ -20,6 +20,8 @@ import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 /** MobileOcrPlugin */
 class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
@@ -699,9 +701,9 @@ class MobileOcrPlugin: FlutterPlugin, MethodCallHandler {
     mainScope.cancel()
     requestTasks.clear()
     runBlocking {
-      withTimeoutOrNull(5_000) {
+      withTimeoutOrNull(5.seconds) {
         while (activeTasks.get() > 0) {
-          delay(50)
+          delay(50.milliseconds)
         }
       }
       if (activeTasks.get() == 0) {

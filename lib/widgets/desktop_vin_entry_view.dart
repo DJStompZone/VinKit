@@ -19,6 +19,7 @@ class DesktopVinEntryView extends StatefulWidget {
     required this.onCycleThemeMode,
     this.strictness = VinScanStrictness.normal,
     this.onStrictnessChanged,
+    this.onOpenSettings,
   });
 
   /// Validator used to normalize and validate VIN entries and barcode payloads.
@@ -38,6 +39,9 @@ class DesktopVinEntryView extends StatefulWidget {
 
   /// Callback invoked when the user switches matching strictness.
   final ValueChanged<VinScanStrictness>? onStrictnessChanged;
+
+  /// Optional callback opening the Settings & Diagnostics sheet.
+  final VoidCallback? onOpenSettings;
 
   @override
   State<DesktopVinEntryView> createState() => _DesktopVinEntryViewState();
@@ -161,6 +165,13 @@ class _DesktopVinEntryViewState extends State<DesktopVinEntryView> {
             tooltip: _themeTooltipFor(widget.themeMode),
             icon: Icon(_themeIconFor(widget.themeMode)),
           ),
+          if (widget.onOpenSettings != null)
+            IconButton(
+              key: const Key('open_settings_button'),
+              onPressed: widget.onOpenSettings,
+              tooltip: 'Settings & Diagnostics',
+              icon: const Icon(Icons.settings_outlined),
+            ),
           const SizedBox(width: 8),
         ],
       ),

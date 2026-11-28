@@ -148,9 +148,59 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                "clearTempCache" -> {
+                    ocrPrepExecutor.execute {
+                        val deletedCount = clearTempImageCache()
+                        mainHandler.post { result.success(deletedCount) }
+                    }
+                }
+
+                "clearOcrModelCache" -> {
+                    ocrPrepExecutor.execute {
+                        val cleared = clearOcrModelCache()
+                        mainHandler.post { result.success(cleared) }
+                    }
+                }
+
                 else -> result.notImplemented()
             }
         }
+    }
+
+    private fun clearTempImageCache(): Int {
+        var deletedCount = 0
+        runCatching {
+            val prepDir = File(cacheDir, "ocr_prep")
+            if (prepDir.exists()) {
+                prepDir.listFiles()?.forEach { file ->
+                    if (file.isFile && file.delete()) {
+                        deletedCount++
+                    }
+                }
+            }
+            cacheDir.listFiles()?.forEach { file ->
+                if (file.isFile) {
+                    val lower = file.name.lowercase()
+                    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png")) {
+                        if (file.delete()) {
+                            deletedCount++
+                        }
+                    }
+                }
+            }
+        }
+        return deletedCount
+    }
+
+    private fun clearOcrModelCache(): Boolean {
+        return runCatching {
+            val modelDir = File(filesDir, "assets/mobile_ocr")
+            if (!modelDir.exists()) {
+                true
+            } else {
+                modelDir.deleteRecursively()
+            }
+        }.getOrDefault(false)
     }
 
     private fun prepareOcrImage(

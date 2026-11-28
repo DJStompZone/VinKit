@@ -1,7 +1,7 @@
 import 'dart:math' as math;
-import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 
 /// Prepared image path returned by [OcrImagePreprocessor.prepareForOcr] or
@@ -148,6 +148,51 @@ class OcrImagePreprocessor {
       // Defensive fallback.
     }
     return null;
+  }
+
+  /// Clears temporary preprocessed and captured camera image files from native
+  /// cache storage.
+  ///
+  /// Returns the number of native temporary files removed (`0` on unsupported
+  /// platforms or when cache is already empty).
+  Future<int> clearTempImageCache() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      return 0;
+    }
+
+    try {
+      final count = await channel
+          .invokeMethod<int>('clearTempCache')
+          .timeout(const Duration(milliseconds: 250), onTimeout: () => 0);
+      return count ?? 0;
+    } on MissingPluginException {
+      return 0;
+    } on PlatformException {
+      return 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Clears cached on-device PaddleOCR v5 ONNX model files on Android so they
+  /// can be freshly verified and re-downloaded on the next OCR scan.
+  Future<bool> clearOcrModelCache() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      return false;
+    }
+
+    try {
+      final cleared = await channel
+          .invokeMethod<bool>('clearOcrModelCache')
+          .timeout(const Duration(milliseconds: 250), onTimeout: () => false);
+      return cleared ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Builds a 4x5 [ColorFilter.matrix] approximating power-law [gamma]
