@@ -1,22 +1,28 @@
 <#
 .SYNOPSIS
-    Bumps the Flutter app version, builds an obfuscated release AAB, and uploads Dart debug symbols to Firebase Crashlytics.
+    Bumps the Flutter app version, builds an obfuscated release AAB or APK, and uploads Dart debug symbols to Firebase Crashlytics.
 
 .DESCRIPTION
-    Resolves the project root relative to this script's location, updates the version line in
-    pubspec.yaml (defaulting to a patch + build bump), clears stale symbols from
-    build/app/outputs/symbols, runs a release appbundle build with obfuscation and split debug
-    info, and uploads the resulting symbols to the VinKit Firebase Android app.
+    Resolves the project root relative to this script's location, optionally updates the version
+    line in pubspec.yaml, clears stale symbols from build/app/outputs/symbols, runs a release
+    build (appbundle or apk) with obfuscation and split debug info, and uploads the resulting
+    symbols to the VinKit Firebase Android app.
+
+.PARAMETER Target
+    Flutter Android build artifact to produce: 'appbundle' (default) or 'apk'.
 
 .PARAMETER Bump
     Version component to increment in pubspec.yaml: 'patch' (default), 'minor', 'major', 'build', or 'none'.
     All options except 'none' increment the trailing build number (+N).
 
 .PARAMETER SkipUpload
-    Builds the release AAB without uploading symbols to Crashlytics.
+    Builds the release artifact without uploading symbols to Crashlytics.
 #>
 [CmdletBinding()]
 param(
+    [ValidateSet('appbundle', 'apk')]
+    [string]$Target = 'appbundle',
+
     [ValidateSet('patch', 'minor', 'major', 'build', 'none')]
     [string]$Bump = 'patch',
 
@@ -111,9 +117,9 @@ try {
         Remove-Item -Recurse -Force $SymbolsDir
     }
 
-    flutter build appbundle --release --obfuscate --split-debug-info=$SymbolsDir
+    flutter build $Target --release --obfuscate --split-debug-info=$SymbolsDir
     if ($LASTEXITCODE -ne 0) {
-        throw "flutter build appbundle failed with exit code $LASTEXITCODE"
+        throw "flutter build $Target failed with exit code $LASTEXITCODE"
     }
 
     if (-not $SkipUpload) {
